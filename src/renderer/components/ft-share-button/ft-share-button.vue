@@ -1,7 +1,7 @@
 <template>
   <ft-icon-button
     ref="iconButton"
-    :title="$t(`Share.Share ${shareTargetType}`)"
+    :title="shareTitle"
     theme="secondary"
     :icon="['fas', 'share-alt']"
     :dropdown-modal-on-mobile="true"
@@ -75,7 +75,7 @@
         id="invidiousShare"
         class="header invidious"
       >
-        <span class="invidiousLogo" />Invidious
+        <span class="invidiousLogo" /> Invidious
       </div>
 
       <div class="buttons">
@@ -121,4 +121,4 @@
 </template>
 
 <script src="./ft-share-button.js" />
-<style scoped lang="scss" src="./ft-share-button.scss" />
+<style scoped src="./ft-share-button.css" />

@@ -1,6 +1,5 @@
 # Put the name of your locale in the same language
 Locale Name: 'English (US)'
-FreeTube: 'फ्रीट्यूब'
 # Currently on Subscriptions, Playlists, and History
 'This part of the app is not ready yet. Come back later when progress has been made.': >-
   ऐप का यह हिस्सा अभी तैयार नहीं है। बाद में वापस आएँ जब प्रगति हुई हो
@@ -35,13 +34,15 @@ Download From Site: 'साइट से डाउनलोड करें'
 A new blog is now available, {blogTitle}. Click to view more: 'एक नया ब्लॉग अब उपलब्ध
   है, {blogTitle}। अधिक देखने के लिए क्लिक करें'
 
+Global:
+  Sort By: 'इसके अनुसार क्रमबद्ध करें'
+
 # Search Bar
 Search / Go to URL: 'खोज / यूआरएल पर जाएं'
   # In Filter Button
 Search Filters:
   Search Filters: 'खोज फ़िल्टर'
   Sort By:
-    Sort By: 'इसके अनुसार क्रमबद्ध करें'
     Most Relevant: 'सबसे प्रासंगिक'
     Rating: 'रेटिंग'
     Upload Date: 'अपलोड की तारीख़'
@@ -74,16 +75,12 @@ Search Filters:
 Subscriptions:
     # On Subscriptions Page
   Subscriptions: 'सब्सक्रिप्शन'
-  Latest Subscriptions: 'सबसे नए सब्सक्रिप्शन'
   This profile has a large number of subscriptions. Forcing RSS to avoid rate limiting: 'यह
     प्रोफ़ाइल के पास बहुत सारे सब्सक्रिप्शनस है।  RSS को बलपूर्वक प्रयोग करके रेट
     लिमिटिंग से बचाएं'
   'Your Subscription list is currently empty. Start adding subscriptions to see them here.': 'आपके
     सब्सक्रिप्शन सूची वर्तमान में ख़ाली है। उन्हें यहां देखने के लिए सब्सक्रिप्शन
     जोड़ना प्रारंभ करें।'
-  'Getting Subscriptions. Please wait.': 'सब्सक्रिप्शन प्राप्त कर रहे हैं, कृपया प्रतीक्षा
-    करें।'
-  Refresh Subscriptions: 'सब्सक्रिप्शन ताज़ा करें'
   Load More Videos: 'और वीडियो लोड करें'
   Error Channels: त्रुटि वाले चैनल
   Disabled Automatic Fetching: आपने स्वचालित सदस्यता लाना अक्षम कर दिया है। सदस्यताओं
@@ -100,13 +97,6 @@ Most Popular: 'सबसे लोकप्रिय'
 Playlists: 'प्लेलिस्ट'
 User Playlists:
   Your Playlists: 'आपकी प्लेलिस्ट'
-  Your saved videos are empty. Click on the save button on the corner of a video to have it listed here: आपके
-    सहेजे गए वीडियो खाली हैं। किसी वीडियो को यहां सूचीबद्ध करने के लिए उसके कोने पर
-    सहेजें बटन पर क्लिक करें
-  Playlist Message: यह पृष्ठ पूरी तरह से काम करने वाली प्लेलिस्ट को प्रतिबिंबित नहीं
-    करता है। यह केवल उन वीडियो को सूचीबद्ध करता है जिन्हें आपने सहेजा है या पसंदीदा
-    है। जब काम समाप्त हो जाता है, तो वर्तमान में यहां सभी वीडियो 'पसंदीदा' प्लेलिस्ट
-    में स्थानांतरित हो जाएंगे।
   Empty Search Message: इस प्लेलिस्ट में आपकी खोज से मेल खाने वाला कोई वीडियो नहीं
     है
   Search bar placeholder: प्लेलिस्ट में खोजें
@@ -169,7 +159,6 @@ Settings:
     Match Top Bar with Main Color: 'टॉप बार को मेन कलर से मैच करें'
   Player Settings:
     Proxy Videos Through Invidious: 'इनविडियस के माध्यम से प्रॉक्सी वीडियो'
-  Advanced Settings: {}
 About:
   #On About page
   Email: ईमेल करें
@@ -196,11 +185,6 @@ Tooltips:
     Invidious Instance: 'वह इनविडियस इंस्टेंस जिससे FreeTube API कॉल के लिए कनेक्ट
       होगा।'
   Player Settings:
-    Force Local Backend for Legacy Formats: 'केवल तभी काम करता है जब Invidious API
-      आपका डिफ़ॉल्ट हो। जब सक्षम किया जाता है, तो स्थानीय एपीआई चलेगा और इसके द्वारा
-      लौटाए गए लीगेसी प्रारूपों का उपयोग करेगा, बजाय इसके कि इनविदियस द्वारा लौटाए
-      गए। मदद करता है जब Invidious द्वारा लौटाए गए वीडियो देश प्रतिबंधों के कारण नहीं
-      चलते हैं।'
     Proxy Videos Through Invidious: 'YouTube से सीधा संबंध बनाने के बजाय वीडियो परोसने
       के लिए Invidious से जुड़ेंगे। एपीआई वरीयता को ओवरराइड करता है।'
   External Player Settings:
@@ -219,8 +203,6 @@ Channels:
   Count: '{number} चैनल मिला(मिले)।'
   Title: चैनल सूची
   Empty: आपकी चैनल सूची वर्तमान में खाली है।
-  Unsubscribe: अनसब्सक्राईब करें
-  Unsubscribed: '{channelName} को आपकी सब्सक्रिप्शन से हटा दिया गया है'
   Unsubscribe Prompt: क्या आप वाकई "{channelName}" की सदस्यता छोड़ना चाहते हैं?
 Are you sure you want to open this link?: क्या आप वाकई इस लिंक को खोलना चाहते हैं?
 Search Bar:

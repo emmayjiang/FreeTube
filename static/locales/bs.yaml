@@ -1,6 +1,5 @@
 # Put the name of your locale in the same language
 Locale Name: 'Bosanski'
-FreeTube: 'FreeTube'
 # Currently on Subscriptions, Playlists, and History
 'This part of the app is not ready yet. Come back later when progress has been made.': >-
   Ovaj dio aplikacije još nije spreman. Vratite se kasnije kad se postigne napredak.
@@ -35,13 +34,15 @@ Download From Site: 'Instaliraj preko stranice'
 A new blog is now available, {blogTitle}. Click to view more: 'Sada je dostupan novi
   blog, {blogTitle}. Kliknite da vidite više'
 
+Global:
+  Sort By: 'Poredaj po'
+
 # Search Bar
 Search / Go to URL: 'Pretražite / idite na URL'
   # In Filter Button
 Search Filters:
   Search Filters: 'Pretraži filtere'
   Sort By:
-    Sort By: 'Poredaj po'
     Most Relevant: 'Naj relevantnije'
     Rating: 'Ocjena'
     Upload Date: 'Datum uploada'
@@ -73,15 +74,12 @@ Search Filters:
 Subscriptions:
     # On Subscriptions Page
   Subscriptions: 'Pretplate'
-  Latest Subscriptions: 'Najnovije pretplate'
   This profile has a large number of subscriptions. Forcing RSS to avoid rate limiting: 'Ovaj
     profil ima veliki broj pretplata. Prisiljavanje RSS-a da izbjegne ograničenje
     brzine'
   'Your Subscription list is currently empty. Start adding subscriptions to see them here.': 'Vaša
     lista pretplata je trenutno prazna. Počnite dodavati pretplate da biste ih vidjeli
     ovdje.'
-  'Getting Subscriptions. Please wait.': 'Preuzimanje pretplata. Molimo sačekajte.'
-  Refresh Subscriptions: 'Osvježi pretplate'
   Load More Videos: 'Očitaj više videozapisa'
 Trending:
   Trending: 'U trendu'
@@ -123,14 +121,11 @@ Settings:
       Beginning: 'Početak'
       Middle: 'Sredina'
       End: 'Kraj'
-    'Invidious Instance (Default is https://invidious.snopyta.org)': 'Invidious primjer
-      (standard je https://invidious.snopyta.org)'
     Region for Trending: 'Regiona za trend'
         #! List countries
   Theme Settings:
     Theme Settings: 'Postavke teme'
     Match Top Bar with Main Color: 'Koristi glavnu boju u gornjoj traci'
-  Advanced Settings: {}
 Channel:
   Videos: {}
 Tooltips: {}

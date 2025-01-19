@@ -1,9 +1,9 @@
-import { defineComponent } from 'vue'
+import { defineComponent, nextTick } from 'vue'
 import { mapActions } from 'vuex'
 import FtCard from '../ft-card/ft-card.vue'
 import FtIconButton from '../ft-icon-button/ft-icon-button.vue'
 import FtShareButton from '../ft-share-button/ft-share-button.vue'
-import FtSubscribeButton from '../ft-subscribe-button/ft-subscribe-button.vue'
+import FtSubscribeButton from '../FtSubscribeButton/FtSubscribeButton.vue'
 import { formatNumber, openExternalLink, showToast } from '../../helpers/utils'
 
 export default defineComponent({
@@ -39,9 +39,13 @@ export default defineComponent({
       type: Number,
       required: true
     },
+    premiereDate: {
+      type: Date,
+      default: undefined
+    },
     viewCount: {
       type: Number,
-      required: true
+      default: null
     },
     subscriptionCountText: {
       type: String,
@@ -102,8 +106,17 @@ export default defineComponent({
     videoThumbnail: {
       type: String,
       required: true
+    },
+    inUserPlaylist: {
+      type: Boolean,
+      required: true
+    },
+    isUnlisted: {
+      type: Boolean,
+      required: false
     }
   },
+  emits: ['change-format', 'pause-player', 'set-info-area-sticky', 'scroll-to-info-area'],
   computed: {
     hideSharingActions: function() {
       return this.$store.getters.getHideSharingActions
@@ -114,7 +127,7 @@ export default defineComponent({
     },
 
     currentLocale: function () {
-      return this.$i18n.locale.replace('_', '-')
+      return this.$i18n.locale
     },
 
     hideVideoLikesAndDislikes: function () {
@@ -125,20 +138,8 @@ export default defineComponent({
       return this.$store.getters.getHideVideoViews
     },
 
-    favoritesPlaylist: function () {
-      return this.$store.getters.getFavorites
-    },
-
-    inFavoritesPlaylist: function () {
-      const index = this.favoritesPlaylist.videos.findIndex((video) => {
-        return video.videoId === this.id
-      })
-
-      return index !== -1
-    },
-
-    favoriteIconTheme: function () {
-      return this.inFavoritesPlaylist ? 'base favorite' : 'base'
+    showPlaylists: function () {
+      return !this.$store.getters.getHidePlaylists
     },
 
     downloadLinkOptions: function () {
@@ -196,10 +197,11 @@ export default defineComponent({
     },
 
     parsedViewCount: function () {
-      if (this.hideVideoViews) {
+      if (this.hideVideoViews || this.viewCount == null) {
         return null
       }
-      return formatNumber(this.viewCount) + ` ${this.$t('Video.Views').toLowerCase()}`
+
+      return this.$tc('Global.Counts.View Count', this.viewCount, { count: formatNumber(this.viewCount) })
     },
 
     dateString: function () {
@@ -225,7 +227,40 @@ export default defineComponent({
 
     defaultPlayback: function () {
       return this.$store.getters.getDefaultPlayback
-    }
+    },
+
+    quickBookmarkPlaylist() {
+      return this.$store.getters.getQuickBookmarkPlaylist
+    },
+    isQuickBookmarkEnabled() {
+      return this.quickBookmarkPlaylist != null
+    },
+    isInQuickBookmarkPlaylist: function () {
+      if (!this.isQuickBookmarkEnabled) { return false }
+
+      // Accessing a reactive property has a negligible amount of overhead,
+      // however as we know that some users have playlists that have more than 10k items in them
+      // it adds up quickly. So create a temporary variable outside of the array, so we only have to do it once.
+      // Also the search is retriggered every time any playlist is modified.
+      const id = this.id
+
+      return this.quickBookmarkPlaylist.videos.some((video) => {
+        return video.videoId === id
+      })
+    },
+    quickBookmarkIconText: function () {
+      if (!this.isQuickBookmarkEnabled) { return false }
+
+      const translationProperties = {
+        playlistName: this.quickBookmarkPlaylist.playlistName,
+      }
+      return this.isInQuickBookmarkPlaylist
+        ? this.$t('User Playlists.Remove from Favorites', translationProperties)
+        : this.$t('User Playlists.Add to Favorites', translationProperties)
+    },
+    quickBookmarkIconTheme: function () {
+      return this.isInQuickBookmarkPlaylist ? 'base favorite' : 'base'
+    },
   },
   mounted: function () {
     if ('mediaSession' in navigator) {
@@ -247,7 +282,7 @@ export default defineComponent({
         if (dropdownShown && window.innerWidth >= 901) {
           // adds a slight delay so we know that the dropdown has shown up
           // and won't mess up our scrolling
-          setTimeout(() => {
+          nextTick(() => {
             this.$emit('scroll-to-info-area')
           })
         }
@@ -258,7 +293,7 @@ export default defineComponent({
     handleExternalPlayer: function () {
       this.$emit('pause-player')
 
-      this.openInExternalPlayer({
+      const payload = {
         watchProgress: this.getTimestamp(),
         playbackRate: this.defaultPlayback,
         videoId: this.id,
@@ -267,16 +302,19 @@ export default defineComponent({
         playlistIndex: this.getPlaylistIndex(),
         playlistReverse: this.getPlaylistReverse(),
         playlistShuffle: this.getPlaylistShuffle(),
-        playlistLoop: this.getPlaylistLoop()
-      })
-    },
-
-    toggleSave: function () {
-      if (this.inFavoritesPlaylist) {
-        this.removeFromPlaylist()
-      } else {
-        this.addToPlaylist()
+        playlistLoop: this.getPlaylistLoop(),
       }
+      // Only play video in non playlist mode when user playlist detected
+      if (this.inUserPlaylist) {
+        Object.assign(payload, {
+          playlistId: null,
+          playlistIndex: null,
+          playlistReverse: null,
+          playlistShuffle: null,
+          playlistLoop: null,
+        })
+      }
+      this.openInExternalPlayer(payload)
     },
 
     handleDownload: function (index) {
@@ -305,48 +343,79 @@ export default defineComponent({
       return group[1]
     },
 
-    addToPlaylist: function () {
+    togglePlaylistPrompt: function () {
       const videoData = {
         videoId: this.id,
         title: this.title,
         author: this.channelName,
         authorId: this.channelId,
-        published: '',
         description: this.description,
         viewCount: this.viewCount,
         lengthSeconds: this.lengthSeconds,
-        timeAdded: new Date().getTime(),
-        isLive: false,
-        paid: false,
-        type: 'video'
+        published: this.published,
+        premiereDate: this.premiereDate,
       }
 
-      const payload = {
-        playlistName: 'Favorites',
-        videoData: videoData
-      }
-
-      this.addVideo(payload)
-
-      showToast(this.$t('Video.Video has been saved'))
+      this.showAddToPlaylistPromptForManyVideos({ videos: [videoData] })
     },
 
-    removeFromPlaylist: function () {
-      const payload = {
-        playlistName: 'Favorites',
-        videoId: this.id
+    toggleQuickBookmarked() {
+      if (!this.isQuickBookmarkEnabled) {
+        // This should be prevented by UI
+        return
       }
 
-      this.removeVideo(payload)
+      if (this.isInQuickBookmarkPlaylist) {
+        this.removeFromQuickBookmarkPlaylist()
+      } else {
+        this.addToQuickBookmarkPlaylist()
+      }
+    },
+    addToQuickBookmarkPlaylist() {
+      const videoData = {
+        videoId: this.id,
+        title: this.title,
+        author: this.channelName,
+        authorId: this.channelId,
+        lengthSeconds: this.lengthSeconds,
+        published: this.published,
+        premiereDate: this.premiereDate,
+      }
 
+      this.addVideo({
+        _id: this.quickBookmarkPlaylist._id,
+        videoData,
+      })
+      // Update playlist's `lastUpdatedAt`
+      this.updatePlaylist({ _id: this.quickBookmarkPlaylist._id })
+
+      // TODO: Maybe show playlist name
+      showToast(this.$t('Video.Video has been saved'))
+    },
+    removeFromQuickBookmarkPlaylist() {
+      this.removeVideo({
+        _id: this.quickBookmarkPlaylist._id,
+        // Remove all playlist items with same videoId
+        videoId: this.id,
+      })
+      // Update playlist's `lastUpdatedAt`
+      this.updatePlaylist({ _id: this.quickBookmarkPlaylist._id })
+
+      // TODO: Maybe show playlist name
       showToast(this.$t('Video.Video has been removed from your saved list'))
+    },
+
+    changeFormat: function(value) {
+      this.$emit('change-format', value)
     },
 
     ...mapActions([
       'openInExternalPlayer',
+      'downloadMedia',
+      'showAddToPlaylistPromptForManyVideos',
       'addVideo',
+      'updatePlaylist',
       'removeVideo',
-      'downloadMedia'
     ])
   }
 })

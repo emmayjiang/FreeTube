@@ -1,9 +1,11 @@
-import { defineComponent } from 'vue'
+import { defineComponent, nextTick } from 'vue'
 import { mapActions } from 'vuex'
 
 import FtCard from '../../components/ft-card/ft-card.vue'
 import FtIconButton from '../../components/ft-icon-button/ft-icon-button.vue'
 import { showToast } from '../../helpers/utils'
+import { MAIN_PROFILE_ID } from '../../../constants'
+import { getFirstCharacter } from '../../helpers/strings'
 
 export default defineComponent({
   name: 'FtProfileSelector',
@@ -18,6 +20,9 @@ export default defineComponent({
     }
   },
   computed: {
+    locale: function () {
+      return this.$i18n.locale
+    },
     profileList: function () {
       return this.$store.getters.getProfileList
     },
@@ -25,23 +30,30 @@ export default defineComponent({
       return this.$store.getters.getActiveProfile
     },
     activeProfileInitial: function () {
-      // use Array.from, so that emojis don't get split up into individual character codes
-      return this.activeProfile?.name?.length > 0 ? Array.from(this.activeProfile.name)[0].toUpperCase() : ''
+      return this.activeProfile?.name
+        ? getFirstCharacter(this.translatedProfileName(this.activeProfile), this.locale).toUpperCase()
+        : ''
     },
     profileInitials: function () {
       return this.profileList.map((profile) => {
-        return profile?.name?.length > 0 ? Array.from(profile.name)[0].toUpperCase() : ''
+        return profile?.name
+          ? getFirstCharacter(this.translatedProfileName(profile), this.locale).toUpperCase()
+          : ''
       })
     }
   },
   methods: {
+    isActiveProfile: function (profile) {
+      return profile._id === this.activeProfile._id
+    },
+
     toggleProfileList: function () {
       this.profileListShown = !this.profileListShown
 
       if (this.profileListShown) {
         // wait until the profile list is visible
         // then focus it so we can hide it automatically when it loses focus
-        setTimeout(() => {
+        nextTick(() => {
           this.$refs.profileList?.$el?.focus()
         })
       }
@@ -68,6 +80,11 @@ export default defineComponent({
       }
     },
 
+    handleProfileListEscape: function () {
+      this.$refs.iconButton.focus()
+      // handleProfileListFocusOut will hide the dropdown for us
+    },
+
     setActiveProfile: function (profile) {
       if (this.activeProfile._id !== profile._id) {
         const targetProfile = this.profileList.find((x) => {
@@ -77,11 +94,15 @@ export default defineComponent({
         if (targetProfile) {
           this.updateActiveProfile(targetProfile._id)
 
-          showToast(this.$t('Profile.{profile} is now the active profile', { profile: profile.name }))
+          showToast(this.$t('Profile.{profile} is now the active profile', { profile: this.translatedProfileName(profile) }))
         }
       }
 
       this.profileListShown = false
+    },
+
+    translatedProfileName: function (profile) {
+      return profile._id === MAIN_PROFILE_ID ? this.$t('Profile.All Channels') : profile.name
     },
 
     ...mapActions([

@@ -1,69 +1,69 @@
 import { defineComponent } from 'vue'
-import { mapActions } from 'vuex'
-import fs from 'fs/promises'
+import { mapActions, mapMutations } from 'vuex'
+import shaka from 'shaka-player'
+import { Utils, YTNodes } from 'youtubei.js'
 import FtLoader from '../../components/ft-loader/ft-loader.vue'
-import FtVideoPlayer from '../../components/ft-video-player/ft-video-player.vue'
+import FtShakaVideoPlayer from '../../components/ft-shaka-video-player/ft-shaka-video-player.vue'
 import WatchVideoInfo from '../../components/watch-video-info/watch-video-info.vue'
-import WatchVideoChapters from '../../components/watch-video-chapters/watch-video-chapters.vue'
-import WatchVideoDescription from '../../components/watch-video-description/watch-video-description.vue'
-import WatchVideoComments from '../../components/watch-video-comments/watch-video-comments.vue'
+import WatchVideoChapters from '../../components/WatchVideoChapters/WatchVideoChapters.vue'
+import WatchVideoDescription from '../../components/WatchVideoDescription/WatchVideoDescription.vue'
+import CommentSection from '../../components/CommentSection/CommentSection.vue'
 import WatchVideoLiveChat from '../../components/watch-video-live-chat/watch-video-live-chat.vue'
 import WatchVideoPlaylist from '../../components/watch-video-playlist/watch-video-playlist.vue'
-import WatchVideoRecommendations from '../../components/watch-video-recommendations/watch-video-recommendations.vue'
-import FtAgeRestricted from '../../components/ft-age-restricted/ft-age-restricted.vue'
-import { pathExists } from '../../helpers/filesystem'
+import WatchVideoRecommendations from '../../components/WatchVideoRecommendations/WatchVideoRecommendations.vue'
+import FtAgeRestricted from '../../components/FtAgeRestricted/FtAgeRestricted.vue'
+import packageDetails from '../../../../package.json'
 import {
   buildVTTFileLocally,
   copyToClipboard,
+  extractNumberFromString,
   formatDurationAsTimestamp,
   formatNumber,
-  getFormatsFromHLSManifest,
-  getUserDataPath,
   showToast
 } from '../../helpers/utils'
 import {
-  filterLocalFormats,
   getLocalVideoInfo,
-  mapLocalFormat,
+  mapLocalLegacyFormat,
   parseLocalSubscriberCount,
   parseLocalTextRuns,
   parseLocalWatchNextVideo
 } from '../../helpers/api/local'
-import { filterInvidiousFormats, invidiousGetVideoInformation, youtubeImageUrlToInvidious } from '../../helpers/api/invidious'
+import {
+  convertInvidiousToLocalFormat,
+  generateInvidiousDashManifestLocally,
+  getProxyUrl,
+  invidiousGetVideoInformation,
+  mapInvidiousLegacyFormat,
+  youtubeImageUrlToInvidious
+} from '../../helpers/api/invidious'
 
-/**
- * @typedef {object} AudioSource
- * @property {string} url
- * @property {string} type
- * @property {string} label
- * @property {string} qualityLabel
- *
- * @typedef {object} AudioTrack
- * @property {string} id
- * @property {('main'|'translation'|'descriptions'|'alternative')} kind - https://videojs.com/guides/audio-tracks/#kind
- * @property {string} label
- * @property {string} language
- * @property {boolean} isDefault
- * @property {AudioSource[]} sourceList
- */
+const MANIFEST_TYPE_DASH = 'application/dash+xml'
+const MANIFEST_TYPE_HLS = 'application/x-mpegurl'
 
 export default defineComponent({
   name: 'Watch',
   components: {
     'ft-loader': FtLoader,
-    'ft-video-player': FtVideoPlayer,
+    'ft-shaka-video-player': FtShakaVideoPlayer,
     'watch-video-info': WatchVideoInfo,
     'watch-video-chapters': WatchVideoChapters,
     'watch-video-description': WatchVideoDescription,
-    'watch-video-comments': WatchVideoComments,
+    CommentSection,
     'watch-video-live-chat': WatchVideoLiveChat,
     'watch-video-playlist': WatchVideoPlaylist,
     'watch-video-recommendations': WatchVideoRecommendations,
     'ft-age-restricted': FtAgeRestricted
   },
-  beforeRouteLeave: function (to, from, next) {
-    this.handleRouteChange(this.videoId)
+  beforeRouteLeave: async function (to, from, next) {
+    this.handleRouteChange()
     window.removeEventListener('beforeunload', this.handleWatchProgress)
+    document.removeEventListener('keydown', this.resetAutoplayInterruptionTimeout)
+    document.removeEventListener('click', this.resetAutoplayInterruptionTimeout)
+
+    if (this.$refs.player) {
+      await this.$refs.player.destroyPlayer()
+    }
+
     next()
   },
   data: function () {
@@ -71,18 +71,17 @@ export default defineComponent({
       isLoading: true,
       firstLoad: true,
       useTheatreMode: false,
-      videoPlayerReady: false,
-      showDashPlayer: true,
-      showLegacyPlayer: false,
-      hidePlayer: false,
+      videoPlayerLoaded: false,
       isFamilyFriendly: false,
       isLive: false,
       liveChat: null,
       isLiveContent: false,
       isUpcoming: false,
       isPostLiveDvr: false,
+      isUnlisted: false,
       upcomingTimestamp: null,
       upcomingTimeLeft: null,
+      /** @type {'dash' | 'audio' | 'legacy'} */
       activeFormat: 'legacy',
       thumbnail: '',
       videoId: '',
@@ -95,42 +94,59 @@ export default defineComponent({
       videoLengthSeconds: 0,
       videoChapters: [],
       videoCurrentChapterIndex: 0,
+      /** @type {'chapters' | 'keyMoments'} */
+      videoChaptersKind: 'chapters',
       channelName: '',
       channelThumbnail: '',
       channelId: '',
       channelSubscriptionCountText: '',
       videoPublished: 0,
+      premiereDate: undefined,
       videoStoryboardSrc: '',
-      dashSrc: [],
-      activeSourceList: [],
-      videoSourceList: [],
-      audioSourceList: [],
-      /**
-       * @type {AudioTrack[]}
-       */
-      audioTracks: [],
-      adaptiveFormats: [],
-      captionHybridList: [], // [] -> Promise[] -> string[] (URIs)
+      /** @type {string|null} */
+      manifestSrc: null,
+      /** @type {(MANIFEST_TYPE_DASH|MANIFEST_TYPE_HLS)} */
+      manifestMimeType: MANIFEST_TYPE_DASH,
+      legacyFormats: [],
+      captions: [],
+      /** @type {'EQUIRECTANGULAR' | 'EQUIRECTANGULAR_THREED_TOP_BOTTOM' | 'MESH'| null} */
+      vrProjection: null,
       recommendedVideos: [],
       downloadLinks: [],
       watchingPlaylist: false,
       playlistId: '',
+      playlistType: '',
+      playlistItemId: null,
+      /** @type {number|null} */
       timestamp: null,
       playNextTimeout: null,
       playNextCountDownIntervalId: null,
       infoAreaSticky: true,
-      commentsEnabled: true,
+      blockVideoAutoplay: false,
+      autoplayInterruptionTimeout: null,
+
+      onMountedRun: false,
+
+      // error handling/messages
+      /** @type {string|null} */
+      errorMessage: null,
+      /** @type {string[]|null} */
+      customErrorIcon: null,
+      videoGenreIsMusic: false,
+      /** @type {Date|null} */
+      streamingDataExpiryDate: null,
+      currentPlaybackRate: null,
     }
   },
   computed: {
-    historyCache: function () {
-      return this.$store.getters.getHistoryCache
+    historyEntry: function () {
+      return this.$store.getters.getHistoryCacheById[this.videoId]
+    },
+    historyEntryExists: function () {
+      return typeof this.historyEntry !== 'undefined'
     },
     rememberHistory: function () {
       return this.$store.getters.getRememberHistory
-    },
-    removeVideoMetaFiles: function () {
-      return this.$store.getters.getRemoveVideoMetaFiles
     },
     saveWatchedProgress: function () {
       return this.$store.getters.getSaveWatchedProgress
@@ -144,11 +160,14 @@ export default defineComponent({
     backendFallback: function () {
       return this.$store.getters.getBackendFallback
     },
-    currentInvidiousInstance: function () {
-      return this.$store.getters.getCurrentInvidiousInstance
+    currentInvidiousInstanceUrl: function () {
+      return this.$store.getters.getCurrentInvidiousInstanceUrl
     },
     proxyVideos: function () {
       return this.$store.getters.getProxyVideos
+    },
+    defaultAutoplayInterruptionIntervalHours: function () {
+      return this.$store.getters.getDefaultAutoplayInterruptionIntervalHours
     },
     defaultInterval: function () {
       return this.$store.getters.getDefaultInterval
@@ -159,8 +178,8 @@ export default defineComponent({
     defaultVideoFormat: function () {
       return this.$store.getters.getDefaultVideoFormat
     },
-    forceLocalBackendForLegacy: function () {
-      return this.$store.getters.getForceLocalBackendForLegacy
+    autoplayEnabled: function () {
+      return this.watchingPlaylist ? this.autoplayPlaylists : this.playNextVideo
     },
     thumbnailPreference: function () {
       return this.$store.getters.getThumbnailPreference
@@ -183,7 +202,7 @@ export default defineComponent({
     hideVideoDescription: function () {
       return this.$store.getters.getHideVideoDescription
     },
-    showFamilyFriendlyOnly: function() {
+    showFamilyFriendlyOnly: function () {
       return this.$store.getters.getShowFamilyFriendlyOnly
     },
     hideChannelSubscriptions: function () {
@@ -195,33 +214,91 @@ export default defineComponent({
     theatrePossible: function () {
       return !this.hideRecommendedVideos || (!this.hideLiveChat && this.isLive) || this.watchingPlaylist
     },
+    autoplayPossible: function () {
+      return (!this.watchingPlaylist && !this.hideRecommendedVideos && !!this.nextRecommendedVideo) ||
+      (this.watchingPlaylist && !this.$refs.watchVideoPlaylist?.shouldStopDueToPlaylistEnd)
+    },
     currentLocale: function () {
-      return this.$i18n.locale.replace('_', '-')
+      return this.$i18n.locale
     },
     hideChapters: function () {
       return this.$store.getters.getHideChapters
     },
-    allowDashAv1Formats: function () {
-      return this.$store.getters.getAllowDashAv1Formats
+    channelsHidden() {
+      return JSON.parse(this.$store.getters.getChannelsHidden).map((ch) => {
+        // Legacy support
+        if (typeof ch === 'string') {
+          return { name: ch, preferredName: '', icon: '' }
+        }
+        return ch
+      })
     },
+    forbiddenTitles() {
+      return JSON.parse(this.$store.getters.getForbiddenTitles)
+    },
+    isUserPlaylistRequested: function () {
+      return this.$route.query.playlistType === 'user'
+    },
+    userPlaylistsReady: function () {
+      return this.$store.getters.getPlaylistsReady
+    },
+    selectedUserPlaylist: function () {
+      if (this.playlistId == null || this.playlistId === '') { return null }
+      if (!this.isUserPlaylistRequested) { return null }
+
+      return this.$store.getters.getPlaylist(this.playlistId)
+    },
+    nextRecommendedVideo: function () {
+      return this.recommendedVideos.find((video) =>
+        !this.isHiddenVideo(this.forbiddenTitles, this.channelsHidden, video)
+      )
+    },
+    startTimeSeconds: function () {
+      if (this.isLoading || this.isLive) {
+        return null
+      }
+
+      if (this.timestamp !== null && this.timestamp < this.videoLengthSeconds) {
+        return this.timestamp
+      } else if (this.saveWatchedProgress && this.historyEntryExists) {
+        // For UX consistency, no progress reading if writing disabled
+
+        /** @type {number} */
+        const watchProgress = this.historyEntry.watchProgress
+
+        if (watchProgress > 0 && watchProgress < this.videoLengthSeconds - 2) {
+          return watchProgress
+        }
+      }
+
+      return null
+    }
   },
   watch: {
-    $route() {
-      this.handleRouteChange(this.videoId)
+    async $route() {
+      this.handleRouteChange()
+
+      if (this.$refs.player) {
+        await this.$refs.player.destroyPlayer()
+      }
+
       // react to route changes...
       this.videoId = this.$route.params.id
 
       this.firstLoad = true
-      this.videoPlayerReady = false
+      this.videoPlayerLoaded = false
+      this.errorMessage = null
+      this.customErrorIcon = null
       this.activeFormat = this.defaultVideoFormat
       this.videoStoryboardSrc = ''
-      this.captionHybridList = []
+      this.captions = []
+      this.vrProjection = null
       this.downloadLinks = []
       this.videoCurrentChapterIndex = 0
-      this.audioTracks = []
+      this.videoGenreIsMusic = false
 
-      this.checkIfPlaylist()
       this.checkIfTimestamp()
+      this.checkIfPlaylist()
 
       switch (this.backendPreference) {
         case 'local':
@@ -229,33 +306,58 @@ export default defineComponent({
           break
         case 'invidious':
           this.getVideoInformationInvidious(this.videoId)
-
-          if (this.forceLocalBackendForLegacy) {
-            this.getVideoInformationLocal(this.videoId)
-          }
           break
       }
-    }
+    },
+    userPlaylistsReady() {
+      this.onMountedDependOnLocalStateLoading()
+    },
   },
-  mounted: function () {
+  created: function () {
     this.videoId = this.$route.params.id
     this.activeFormat = this.defaultVideoFormat
-    this.useTheatreMode = this.defaultTheatreMode
 
-    this.checkIfPlaylist()
     this.checkIfTimestamp()
-
-    if (!process.env.IS_ELECTRON || this.backendPreference === 'invidious') {
-      this.getVideoInformationInvidious()
-    } else {
-      this.getVideoInformationLocal()
-    }
-
-    window.addEventListener('beforeunload', this.handleWatchProgress)
+    this.currentPlaybackRate = this.$store.getters.getDefaultPlayback
+  },
+  mounted: function () {
+    this.onMountedDependOnLocalStateLoading()
   },
   methods: {
+    onMountedDependOnLocalStateLoading() {
+      // Prevent running twice
+      if (this.onMountedRun) { return }
+      // Stuff that require user playlists to be ready
+      if (this.isUserPlaylistRequested && !this.userPlaylistsReady) { return }
+
+      this.onMountedRun = true
+
+      this.checkIfPlaylist()
+
+      // this has to be below checkIfPlaylist() as theatrePossible needs to know if there is a playlist or not
+      this.useTheatreMode = this.defaultTheatreMode && this.theatrePossible
+
+      if (!process.env.SUPPORTS_LOCAL_API || this.backendPreference === 'invidious') {
+        this.getVideoInformationInvidious()
+      } else {
+        this.getVideoInformationLocal()
+      }
+
+      document.removeEventListener('keydown', this.resetAutoplayInterruptionTimeout)
+      document.removeEventListener('click', this.resetAutoplayInterruptionTimeout)
+      document.addEventListener('keydown', this.resetAutoplayInterruptionTimeout)
+      document.addEventListener('click', this.resetAutoplayInterruptionTimeout)
+
+      window.addEventListener('beforeunload', this.handleWatchProgress)
+      this.resetAutoplayInterruptionTimeout()
+    },
+
     changeTimestamp: function (timestamp) {
-      this.$refs.videoPlayer.player.currentTime(timestamp)
+      const player = this.$refs.player
+
+      if (!this.isLoading && player?.hasLoaded) {
+        player.setCurrentTime(timestamp)
+      }
     },
 
     getVideoInformationLocal: async function () {
@@ -264,13 +366,19 @@ export default defineComponent({
       }
 
       try {
-        let result = await getLocalVideoInfo(this.videoId)
+        const result = await getLocalVideoInfo(this.videoId)
 
         this.isFamilyFriendly = result.basic_info.is_family_safe
 
-        this.recommendedVideos = result.watch_next_feed
-          ?.filter((item) => item.type === 'CompactVideo')
+        const recommendedVideos = result.watch_next_feed
+          ?.filter((item) => item.type === 'CompactVideo' || item.type === 'CompactMovie')
           .map(parseLocalWatchNextVideo) ?? []
+
+        // place watched recommended videos last
+        this.recommendedVideos = [
+          ...recommendedVideos.filter((video) => !this.isRecommendedVideoWatched(video.videoId)),
+          ...recommendedVideos.filter((video) => this.isRecommendedVideoWatched(video.videoId))
+        ]
 
         if (this.showFamilyFriendlyOnly && !this.isFamilyFriendly) {
           this.isLoading = false
@@ -278,28 +386,12 @@ export default defineComponent({
           return
         }
 
-        let playabilityStatus = result.playability_status
-        let bypassedResult = null
-        if (playabilityStatus.status === 'LOGIN_REQUIRED') {
-          // try to bypass the age restriction
-          bypassedResult = await getLocalVideoInfo(this.videoId, true)
-          playabilityStatus = result.playability_status
-        }
-
-        if (playabilityStatus.status === 'UNPLAYABLE') {
-          /**
-           * @type {import ('youtubei.js').YTNodes.PlayerErrorMessage}
-           */
-          const errorScreen = playabilityStatus.error_screen
-          throw new Error(`[${playabilityStatus.status}] ${errorScreen.reason.text}: ${errorScreen.subreason.text}`)
-        }
-
         // extract localised title first and fall back to the not localised one
         this.videoTitle = result.primary_info?.title.text ?? result.basic_info.title
-        this.videoViewCount = result.basic_info.view_count
+        this.videoViewCount = result.basic_info.view_count ?? (result.primary_info.view_count ? extractNumberFromString(result.primary_info.view_count.text) : null)
 
-        this.channelId = result.basic_info.channel_id
-        this.channelName = result.basic_info.author
+        this.channelId = result.basic_info.channel_id ?? result.secondary_info.owner?.author.id
+        this.channelName = result.basic_info.author ?? result.secondary_info.owner?.author.name
 
         if (result.secondary_info.owner?.author) {
           this.channelThumbnail = result.secondary_info.owner.author.best_thumbnail?.url ?? ''
@@ -307,13 +399,21 @@ export default defineComponent({
           this.channelThumbnail = ''
         }
 
+        this.videoGenreIsMusic = result.basic_info.category === 'Music'
+
         this.updateSubscriptionDetails({
           channelThumbnailUrl: this.channelThumbnail.length === 0 ? null : this.channelThumbnail,
           channelName: this.channelName,
           channelId: this.channelId
         })
 
-        this.videoPublished = new Date(result.page[0].microformat.publish_date.replace('-', '/')).getTime()
+        if (result.page[0].microformat?.publish_date) {
+          // `result.page[0].microformat.publish_date` example value: `2023-08-12T08:59:59-07:00`
+          this.videoPublished = Date.parse(result.page[0].microformat.publish_date)
+        } else {
+          // text date Jan 1, 2000, not as accurate but better than nothing
+          this.videoPublished = Date.parse(result.primary_info.published)
+        }
 
         if (result.secondary_info?.description.runs) {
           try {
@@ -337,7 +437,7 @@ export default defineComponent({
             this.thumbnail = `https://i.ytimg.com/vi/${this.videoId}/maxres3.jpg`
             break
           default:
-            this.thumbnail = result.basic_info.thumbnail[0].url
+            this.thumbnail = result.basic_info.thumbnail?.[0].url ?? `https://i.ytimg.com/vi/${this.videoId}/maxresdefault.jpg`
             break
         }
 
@@ -355,6 +455,7 @@ export default defineComponent({
         this.isUpcoming = !!result.basic_info.is_upcoming
         this.isLiveContent = !!result.basic_info.is_live_content
         this.isPostLiveDvr = !!result.basic_info.is_post_live_dvr
+        this.isUnlisted = !!result.basic_info.is_unlisted
 
         const subCount = !result.secondary_info.owner.subscriber_count.isEmpty() ? parseLocalSubscriberCount(result.secondary_info.owner.subscriber_count.text) : NaN
 
@@ -376,11 +477,30 @@ export default defineComponent({
                 timestamp: formatDurationAsTimestamp(start),
                 startSeconds: start,
                 endSeconds: 0,
-                thumbnail: chapter.thumbnail[0].url
+                thumbnail: chapter.thumbnail[0]
               })
             }
           } else {
-            chapters = this.extractChaptersFromDescription(result.basic_info.short_description)
+            /** @type {import('youtubei.js').YTNodes.MacroMarkersList | null | undefined} */
+            const macroMarkersList = result.page[1]?.engagement_panels
+              ?.find(pannel => pannel.panel_identifier === 'engagement-panel-macro-markers-auto-chapters')?.content
+
+            if (macroMarkersList) {
+              for (const item of macroMarkersList.contents) {
+                if (item instanceof YTNodes.MacroMarkersListItem) {
+                  chapters.push({
+                    title: item.title.text,
+                    timestamp: item.time_description.text,
+                    startSeconds: Utils.timeToSeconds(item.time_description.text),
+                    endSeconds: 0,
+                    thumbnail: item.thumbnail[0]
+                  })
+                }
+              }
+              this.videoChaptersKind = 'keyMoments'
+            } else {
+              chapters = this.extractChaptersFromDescription(result.basic_info.short_description ?? result.secondary_info.description.text)
+            }
           }
 
           if (chapters.length > 0) {
@@ -396,66 +516,94 @@ export default defineComponent({
 
         this.videoChapters = chapters
 
-        if (!this.hideLiveChat && this.isLive && result.livechat) {
+        const playabilityStatus = result.playability_status
+
+        // The apostrophe is intentionally that one (char code 8217), because that is the one YouTube uses
+        const BOT_MESSAGE = 'Sign in to confirm you’re not a bot'
+
+        const isDrmProtected = result.streaming_data?.adaptive_formats.some(format => format.drm_families || format.drm_track_type)
+
+        if (playabilityStatus.status === 'UNPLAYABLE' || playabilityStatus.status === 'LOGIN_REQUIRED' || isDrmProtected) {
+          if (playabilityStatus.error_screen?.offer_id === 'sponsors_only_video') {
+            // Members-only videos can only be watched while logged into a Google account that is a paid channel member
+            // so there is no point trying any other backends as it will always fail
+            this.errorMessage = this.$t('Video.MembersOnly')
+            this.customErrorIcon = ['fas', 'money-check-dollar']
+            this.isLoading = false
+            this.updateTitle()
+            return
+          } else if (playabilityStatus.reason === 'Sign in to confirm your age' || (result.has_trailer && result.getTrailerInfo() === null)) {
+            // Age-restricted videos can only be watched while logged into a Google account that is age-verified
+            // so there is no point trying any other backends as it will always fail
+            this.errorMessage = this.$t('Video.AgeRestricted')
+            this.isLoading = false
+            this.updateTitle()
+            return
+          } else if (isDrmProtected) {
+            // DRM protected videos (e.g. movies) cannot be played in FreeTube,
+            // as they require the proprietary and closed source Wideview CDM which is understandably not included in standard Electron builds
+            this.errorMessage = this.$t('Video.DRMProtected')
+            this.isLoading = false
+            this.updateTitle()
+            return
+          }
+
+          let errorText
+
+          if (playabilityStatus.reason === BOT_MESSAGE || playabilityStatus.reason === 'Please sign in') {
+            errorText = this.$t('Video.IP block')
+          } else {
+            errorText = `[${playabilityStatus.status}] ${playabilityStatus.reason}`
+
+            if (playabilityStatus.error_screen?.subreason) {
+              errorText += `: ${playabilityStatus.error_screen.subreason.text}`
+            }
+          }
+
+          if (this.backendFallback) {
+            throw new Error(errorText)
+          } else {
+            this.errorMessage = errorText
+            this.isLoading = false
+            this.updateTitle()
+            return
+          }
+        }
+
+        if (!this.hideLiveChat && (this.isLive || this.isUpcoming) && result.livechat) {
           this.liveChat = result.getLiveChat()
         } else {
           this.liveChat = null
         }
 
-        // region No comment detection
-        // For videos without any comment (comment disabled?)
-        // e.g. https://youtu.be/8NBSwDEf8a8
-        //
-        // `comments_entry_point_header` is null probably when comment disabled
-        // e.g. https://youtu.be/8NBSwDEf8a8
-        // However videos with comments enabled but have no comment
-        // are different (which is not detected here)
-        this.commentsEnabled = result.comments_entry_point_header != null
-        // endregion No comment detection
-
-        // the bypassed result is missing some of the info that we extract in the code above
-        // so we only overwrite the result here
-        // we need the bypassed result for the streaming data and the subtitles
-        if (bypassedResult) {
-          result = bypassedResult
-        }
-
         if ((this.isLive || this.isPostLiveDvr) && !this.isUpcoming) {
-          try {
-            const formats = await getFormatsFromHLSManifest(result.streaming_data.hls_manifest_url)
+          let useRemoteManifest = true
 
-            this.videoSourceList = formats
-              .sort((formatA, formatB) => {
-                return formatB.height - formatA.height
-              })
-              .map((format) => {
-                return {
-                  url: format.url,
-                  fps: format.fps,
-                  type: 'application/x-mpegURL',
-                  label: 'Dash',
-                  qualityLabel: `${format.height}p`
-                }
-              })
-          } catch (e) {
-            console.error('Failed to extract formats form HLS manifest, falling back to passing it directly to video.js', e)
-
-            this.videoSourceList = [
-              {
-                url: result.streaming_data.hls_manifest_url,
-                type: 'application/x-mpegURL',
-                label: 'Dash',
-                qualityLabel: 'Live'
-              }
-            ]
+          if (this.isPostLiveDvr) {
+            try {
+              this.manifestSrc = await this.createLocalDashManifest(result, true)
+              this.manifestMimeType = MANIFEST_TYPE_DASH
+              useRemoteManifest = false
+            } catch (error) {
+              console.error(`Failed to generate DASH manifest for this Post Live DVR video ${this.videoId}, falling back to using YouTube's provided one...`, error)
+            }
           }
 
-          this.showLegacyPlayer = true
-          this.showDashPlayer = false
-          this.activeFormat = 'legacy'
-          this.activeSourceList = this.videoSourceList
-          this.audioSourceList = null
-          this.dashSrc = null
+          if (useRemoteManifest) {
+            if (result.streaming_data.dash_manifest_url) {
+              this.manifestSrc = result.streaming_data.dash_manifest_url
+              this.manifestMimeType = MANIFEST_TYPE_DASH
+            } else {
+              this.manifestSrc = result.streaming_data.hls_manifest_url
+              this.manifestMimeType = MANIFEST_TYPE_HLS
+            }
+          }
+
+          this.streamingDataExpiryDate = result.streaming_data.expires
+
+          if (this.activeFormat === 'legacy') {
+            this.activeFormat = 'dash'
+          }
         } else if (this.isUpcoming) {
           const upcomingTimestamp = result.basic_info.start_timestamp
 
@@ -503,26 +651,29 @@ export default defineComponent({
               // TODO a I18n entry for time format might be needed here
               this.upcomingTimeLeft = new Intl.RelativeTimeFormat(this.currentLocale).format(upcomingTimeLeft, timeUnit)
             }
+
+            this.premiereDate = upcomingTimestamp
           } else {
             this.upcomingTimestamp = null
             this.upcomingTimeLeft = null
+            this.premiereDate = undefined
           }
         } else {
           this.videoLengthSeconds = result.basic_info.duration
           if (result.streaming_data) {
+            this.streamingDataExpiryDate = result.streaming_data.expires
+
             if (result.streaming_data.formats.length > 0) {
-              this.videoSourceList = result.streaming_data.formats.map(mapLocalFormat).reverse()
-            } else {
-              this.videoSourceList = filterLocalFormats(result.streaming_data.adaptive_formats, this.allowDashAv1Formats).map(mapLocalFormat).reverse()
+              this.legacyFormats = result.streaming_data.formats.map(mapLocalLegacyFormat)
             }
-            this.adaptiveFormats = this.videoSourceList
 
             /** @type {import('../../helpers/api/local').LocalFormat[]} */
             const formats = [...result.streaming_data.formats, ...result.streaming_data.adaptive_formats]
-            this.downloadLinks = formats.map((format) => {
+
+            const downloadLinks = formats.map((format) => {
               const qualityLabel = format.quality_label ?? format.bitrate
               const fps = format.fps ? `${format.fps}fps` : 'kbps'
-              const type = format.mime_type.match(/.*;/)[0].replace(';', '')
+              const type = format.mime_type.split(';')[0]
               let label = `${qualityLabel} ${fps} - ${type}`
 
               if (format.has_audio !== format.has_video) {
@@ -540,30 +691,49 @@ export default defineComponent({
             })
 
             if (result.captions) {
-              const captionTracks = result.captions.caption_tracks.map((caption) => {
-                return {
-                  url: caption.base_url,
-                  label: caption.name.text,
-                  language_code: caption.language_code,
-                  kind: caption.kind
-                }
-              })
-              if (this.currentLocale) {
-                const noLocaleCaption = !captionTracks.some(track =>
-                  track.language_code === this.currentLocale && track.kind !== 'asr'
-                )
+              const captionTracks = result.captions?.caption_tracks?.map((caption) => {
+                const url = new URL(caption.base_url)
+                url.searchParams.set('fmt', 'vtt')
 
-                if (!this.currentLocale.startsWith('en') && noLocaleCaption) {
-                  captionTracks.forEach((caption) => {
-                    this.tryAddingTranslatedLocaleCaption(captionTracks, this.currentLocale, caption.url)
-                  })
+                return {
+                  url: url.toString(),
+                  label: caption.name.text,
+                  language: caption.language_code,
+                  mimeType: 'text/vtt'
+                }
+              }) ?? []
+
+              if (captionTracks.length > 0) {
+                const languagesSet = new Set([this.currentLocale, this.currentLocale.split('-')[0]])
+
+                // special cases
+                switch (this.currentLocale) {
+                  case 'nn':
+                  case 'nb-NO':
+                    // according to https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes
+                    // "no" is the macro language for "nb" and "nn"
+                    languagesSet.add('no')
+                    break
+                  case 'he':
+                    // according to https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes
+                    // "iw" is the old/original code for Hewbrew, these days it's "he"
+                    languagesSet.add('iw')
+                    break
+                }
+
+                if (!captionTracks.some(captionTrack => languagesSet.has(captionTrack.language))) {
+                  const translatedCaptionTrack = this.getTranslatedLocaleCaption(result.captions, languagesSet)
+
+                  if (translatedCaptionTrack) {
+                    captionTracks.push(translatedCaptionTrack)
+                  }
                 }
               }
 
-              this.captionHybridList = this.createCaptionPromiseList(captionTracks)
+              this.captions = captionTracks
 
               const captionLinks = captionTracks.map((caption) => {
-                const label = `${caption.label} (${caption.language_code}) - text/vtt`
+                const label = `${caption.label} (${caption.language}) - text/vtt`
 
                 return {
                   url: caption.url,
@@ -571,8 +741,9 @@ export default defineComponent({
                 }
               })
 
-              this.downloadLinks = this.downloadLinks.concat(captionLinks)
+              downloadLinks.push(...captionLinks)
             }
+            this.downloadLinks = downloadLinks
           } else {
             // video might be region locked or something else. This leads to no formats being available
             showToast(
@@ -584,105 +755,28 @@ export default defineComponent({
           }
 
           if (result.streaming_data?.adaptive_formats.length > 0) {
-            const audioFormats = result.streaming_data.adaptive_formats.filter((format) => {
-              return format.has_audio
-            })
+            this.vrProjection = result.streaming_data.adaptive_formats
+              .find(format => {
+                return format.has_video &&
+                  typeof format.projection_type === 'string' &&
+                  format.projection_type !== 'RECTANGULAR'
+              })
+              ?.projection_type ?? null
 
-            const hasMultipleAudioTracks = audioFormats.some(format => format.audio_track)
-
-            if (hasMultipleAudioTracks) {
-              /** @type {string[]} */
-              const ids = []
-
-              /** @type {AudioTrack[]} */
-              const audioTracks = []
-
-              /** @type {import('youtubei.js').Misc.Format[][]} */
-              const sourceLists = []
-
-              for (const format of audioFormats) {
-                // Some videos with multiple audio tracks, have a broken one, that doesn't have any audio track information
-                // It seems to be the same as default audio track but broken
-                // At the time of writing, this video has a broken audio track: https://youtu.be/UJeSWbR6W04
-                if (!format.audio_track) {
-                  continue
-                }
-
-                const index = ids.indexOf(format.audio_track.id)
-                if (index === -1) {
-                  ids.push(format.audio_track.id)
-
-                  let kind
-
-                  if (format.audio_track.audio_is_default) {
-                    kind = 'main'
-                  } else if (format.is_dubbed) {
-                    kind = 'translation'
-                  } else if (format.is_descriptive) {
-                    kind = 'descriptions'
-                  } else {
-                    kind = 'alternative'
-                  }
-
-                  audioTracks.push({
-                    id: format.audio_track.id,
-                    kind,
-                    label: format.audio_track.display_name,
-                    language: format.language,
-                    isDefault: format.audio_track.audio_is_default,
-                    sourceList: []
-                  })
-
-                  sourceLists.push([
-                    format
-                  ])
-                } else {
-                  sourceLists[index].push(format)
-                }
-              }
-
-              for (let i = 0; i < audioTracks.length; i++) {
-                audioTracks[i].sourceList = this.createLocalAudioSourceList(sourceLists[i])
-              }
-
-              this.audioTracks = audioTracks
-
-              this.audioSourceList = this.audioTracks.find(track => track.isDefault).sourceList
-            } else {
-              this.audioTracks = []
-
-              this.audioSourceList = this.createLocalAudioSourceList(audioFormats)
-            }
-
-            // we need to alter the result object so the toDash function uses the filtered formats too
-            result.streaming_data.adaptive_formats = filterLocalFormats(result.streaming_data.adaptive_formats, this.allowDashAv1Formats)
-
-            // When `this.proxyVideos` is true
-            // It's possible that the Invidious instance used, only supports a subset of the formats from Local API
-            // i.e. the value passed into `adaptiveFormats`
-            // e.g. Supports 720p60, but not 720p - https://[DOMAIN_NAME]/api/manifest/dash/id/v3wm83zoSSY?local=true
-            if (this.proxyVideos) {
-              this.adaptiveFormats = await this.getAdaptiveFormatsInvidious()
-              this.dashSrc = await this.createInvidiousDashManifest()
-            } else {
-              this.adaptiveFormats = result.streaming_data.adaptive_formats.map(mapLocalFormat)
-              this.dashSrc = await this.createLocalDashManifest(result)
-            }
-
-            if (this.activeFormat === 'audio') {
-              this.activeSourceList = this.audioSourceList
-            } else {
-              this.activeSourceList = this.videoSourceList
-            }
+            this.manifestSrc = await this.createLocalDashManifest(result)
+            this.manifestMimeType = MANIFEST_TYPE_DASH
           } else {
-            this.activeSourceList = this.videoSourceList
-            this.audioSourceList = null
-            this.dashSrc = null
+            this.manifestSrc = null
             this.enableLegacyFormat()
           }
 
           if (result.storyboards?.type === 'PlayerStoryboardSpec') {
-            await this.createLocalStoryboardUrls(result.storyboards.boards.at(-1))
+            /** @type {import('youtubei.js/dist/src/parser/classes/PlayerStoryboardSpec').StoryboardData[]} */
+            let source = result.storyboards.boards
+            if (window.innerWidth < 500) {
+              source = source.filter((board) => board.thumbnail_height <= 90)
+            }
+            this.videoStoryboardSrc = this.createLocalStoryboardUrls(source.at(-1))
           }
         }
 
@@ -696,8 +790,6 @@ export default defineComponent({
         console.error(err)
         if (this.backendPreference === 'local' && this.backendFallback && !err.toString().includes('private')) {
           showToast(this.$t('Falling back to Invidious API'))
-          // Invidious doesn't support multiple audio tracks, so we need to clear this to prevent the player getting confused
-          this.audioTracks = []
           this.getVideoInformationInvidious()
         } else {
           this.isLoading = false
@@ -709,9 +801,6 @@ export default defineComponent({
       if (this.firstLoad) {
         this.isLoading = true
       }
-
-      this.dashSrc = this.createInvidiousDashManifest()
-      this.videoStoryboardSrc = `${this.currentInvidiousInstance}/api/v1/storyboards/${this.videoId}?height=90`
 
       invidiousGetVideoInformation(this.videoId)
         .then(async result => {
@@ -730,10 +819,12 @@ export default defineComponent({
             this.videoDislikeCount = result.dislikeCount
           }
 
+          this.videoGenreIsMusic = result.genre === 'Music'
+
           this.channelId = result.authorId
           this.channelName = result.author
           const channelThumb = result.authorThumbnails[1]
-          this.channelThumbnail = channelThumb ? youtubeImageUrlToInvidious(channelThumb.url, this.currentInvidiousInstance) : ''
+          this.channelThumbnail = channelThumb ? youtubeImageUrlToInvidious(channelThumb.url, this.currentInvidiousInstanceUrl) : ''
           this.updateSubscriptionDetails({
             channelThumbnailUrl: channelThumb?.url,
             channelName: result.author,
@@ -742,26 +833,39 @@ export default defineComponent({
 
           this.videoPublished = result.published * 1000
           this.videoDescriptionHtml = result.descriptionHtml
-          this.recommendedVideos = result.recommendedVideos
-          this.adaptiveFormats = await this.getAdaptiveFormatsInvidious(result)
+          const recommendedVideos = result.recommendedVideos
+          // place watched recommended videos last
+          this.recommendedVideos = [
+            ...recommendedVideos.filter((video) => !this.isRecommendedVideoWatched(video.videoId)),
+            ...recommendedVideos.filter((video) => this.isRecommendedVideoWatched(video.videoId))
+          ]
           this.isLive = result.liveNow
           this.isFamilyFriendly = result.isFamilyFriendly
-          this.captionHybridList = result.captions.map(caption => {
-            caption.url = this.currentInvidiousInstance + caption.url
-            caption.type = ''
-            caption.dataSource = 'invidious'
-            return caption
+          this.isPostLiveDvr = !!result.isPostLiveDvr
+          this.isUnlisted = !result.isListed
+
+          this.captions = result.captions.map(caption => {
+            return {
+              url: this.currentInvidiousInstanceUrl + caption.url,
+              label: caption.label,
+              language: caption.language_code,
+              mimeType: 'text/vtt'
+            }
           })
+
+          if (!this.isLive && !this.isPostLiveDvr) {
+            this.videoStoryboardSrc = `${this.currentInvidiousInstanceUrl}/api/v1/storyboards/${this.videoId}?height=90`
+          }
 
           switch (this.thumbnailPreference) {
             case 'start':
-              this.thumbnail = `${this.currentInvidiousInstance}/vi/${this.videoId}/maxres1.jpg`
+              this.thumbnail = `${this.currentInvidiousInstanceUrl}/vi/${this.videoId}/maxres1.jpg`
               break
             case 'middle':
-              this.thumbnail = `${this.currentInvidiousInstance}/vi/${this.videoId}/maxres2.jpg`
+              this.thumbnail = `${this.currentInvidiousInstanceUrl}/vi/${this.videoId}/maxres2.jpg`
               break
             case 'end':
-              this.thumbnail = `${this.currentInvidiousInstance}/vi/${this.videoId}/maxres3.jpg`
+              this.thumbnail = `${this.currentInvidiousInstanceUrl}/vi/${this.videoId}/maxres3.jpg`
               break
             default:
               this.thumbnail = result.videoThumbnails[0].url
@@ -784,47 +888,68 @@ export default defineComponent({
           }
           this.videoChapters = chapters
 
-          if (this.isLive) {
-            this.showLegacyPlayer = true
-            this.showDashPlayer = false
-            this.activeFormat = 'legacy'
+          if (this.isLive || this.isPostLiveDvr) {
+            // The live DASH manifest is currently unusable as it returns 403s after 1 minute of playback
+            // so we have to use the HLS one for now.
+            // Leaving the code here commented out in case we can use it again in the future
+            // const url = `${this.currentInvidiousInstanceUrl}/api/manifest/dash/id/${this.videoId}`
 
-            this.videoSourceList = [
-              {
-                url: result.hlsUrl,
-                type: 'application/x-mpegURL',
-                label: 'Dash',
-                qualityLabel: 'Live'
-              }
-            ]
+            // // Proxying doesn't work for live or post live DVR DASH, so use HLS instead
+            // // https://github.com/iv-org/invidious/pull/4589
+            // if (this.proxyVideos) {
 
-            // Grabs the adaptive formats from Invidious.  Might be worth making these work.
-            // The type likely needs to be changed in order for these to be played properly.
-            // this.videoSourceList = result.adaptiveFormats.filter((format) => {
-            //   if (typeof (format.type) !== 'undefined') {
-            //     return format.type.includes('video/mp4')
-            //   }
-            // }).map((format) => {
-            //   return {
-            //     url: format.url,
-            //     type: 'application/x-mpegURL',
-            //     label: 'Dash',
-            //     qualityLabel: format.qualityLabel
-            //   }
-            // })
+            this.streamingDataExpiryDate = this.extractExpiryDateFromStreamingUrl(result.adaptiveFormats[0].url)
 
-            this.activeSourceList = this.videoSourceList
-          } else if (this.forceLocalBackendForLegacy) {
-            this.getLegacyFormats()
+            let hlsManifestUrl = result.hlsUrl
+
+            if (this.proxyVideos) {
+              const url = new URL(hlsManifestUrl)
+              url.searchParams.set('local', 'true')
+              hlsManifestUrl = url.toString()
+            }
+
+            this.manifestSrc = hlsManifestUrl
+            this.manifestMimeType = MANIFEST_TYPE_HLS
+
+            // The HLS manifests only contain combined audio+video streams, so we can't do audio only
+            if (this.activeFormat === 'audio') {
+              this.activeFormat = 'dash'
+            }
+            // } else {
+            //   this.manifestSrc = url
+            //   this.manifestMimeType = MANIFEST_TYPE_DASH
+            // }
+
+            this.legacyFormats = []
+
+            if (this.activeFormat === 'legacy') {
+              this.activeFormat = 'dash'
+            }
           } else {
             this.videoLengthSeconds = result.lengthSeconds
-            this.videoSourceList = result.formatStreams.reverse()
 
-            this.downloadLinks = result.adaptiveFormats.concat(this.videoSourceList).map((format) => {
+            this.streamingDataExpiryDate = this.extractExpiryDateFromStreamingUrl(result.adaptiveFormats[0].url)
+
+            this.legacyFormats = result.formatStreams.map(mapInvidiousLegacyFormat)
+
+            if (!process.env.SUPPORTS_LOCAL_API || this.proxyVideos) {
+              this.legacyFormats.forEach(format => {
+                format.url = getProxyUrl(format.url)
+              })
+            }
+
+            this.vrProjection = result.adaptiveFormats
+              .find(stream => {
+                return typeof stream.projectionType === 'string' &&
+                  stream.projectionType !== 'RECTANGULAR'
+              })
+              ?.projectionType ?? null
+
+            this.downloadLinks = result.adaptiveFormats.concat(result.formatStreams).map((format) => {
               const qualityLabel = format.qualityLabel || format.bitrate
               const itag = parseInt(format.itag)
               const fps = format.fps ? (format.fps + 'fps') : 'kbps'
-              const type = format.type.match(/.*;/)[0].replace(';', '')
+              const type = format.type.split(';')[0]
               let label = `${qualityLabel} ${fps} - ${type}`
 
               if (itag !== 18 && itag !== 22) {
@@ -850,24 +975,8 @@ export default defineComponent({
               return object
             }))
 
-            this.audioSourceList = result.adaptiveFormats.filter((format) => {
-              return format.type.includes('audio')
-            }).map((format) => {
-              return {
-                url: format.url,
-                type: format.type,
-                label: 'Audio',
-                qualityLabel: parseInt(format.bitrate)
-              }
-            }).sort((a, b) => {
-              return a.qualityLabel - b.qualityLabel
-            })
-
-            if (this.activeFormat === 'audio') {
-              this.activeSourceList = this.audioSourceList
-            } else {
-              this.activeSourceList = this.videoSourceList
-            }
+            this.manifestSrc = await this.createInvidiousDashManifest(result)
+            this.manifestMimeType = MANIFEST_TYPE_DASH
           }
 
           this.updateTitle()
@@ -877,17 +986,23 @@ export default defineComponent({
         .catch(err => {
           console.error(err)
           const errorMessage = this.$t('Invidious API Error (Click to copy)')
-          showToast(`${errorMessage}: ${err.responseText}`, 10000, () => {
-            copyToClipboard(err.responseText)
+          showToast(`${errorMessage}: ${err}`, 10000, () => {
+            copyToClipboard(err)
           })
           console.error(err)
-          if (process.env.IS_ELECTRON && this.backendPreference === 'invidious' && this.backendFallback) {
+          if (process.env.SUPPORTS_LOCAL_API && this.backendPreference === 'invidious' && this.backendFallback) {
             showToast(this.$t('Falling back to Local API'))
             this.getVideoInformationLocal()
           } else {
             this.isLoading = false
           }
         })
+    },
+
+    extractExpiryDateFromStreamingUrl: function (url) {
+      const expireString = new URL(url).searchParams.get('expire')
+
+      return new Date(parseInt(expireString) * 1000)
     },
 
     /**
@@ -933,9 +1048,16 @@ export default defineComponent({
       chapters.at(-1).endSeconds = videoLengthSeconds
     },
 
-    updateCurrentChapter: function () {
+    /**
+     * @param {number} currentSeconds
+     */
+    updateCurrentChapter: function (currentSeconds) {
       const chapters = this.videoChapters
-      const currentSeconds = this.getTimestamp()
+
+      if (this.hideChapters || chapters.length === 0) {
+        return
+      }
+
       const currentChapterStart = chapters[this.videoCurrentChapterIndex].startSeconds
 
       if (currentSeconds !== currentChapterStart) {
@@ -950,42 +1072,6 @@ export default defineComponent({
       }
     },
 
-    /**
-     * @param {import('../../helpers/api/local').LocalFormat[]} audioFormats
-     * @returns {AudioSource[]}
-     */
-    createLocalAudioSourceList: function (audioFormats) {
-      return audioFormats.sort((a, b) => {
-        return a.bitrate - b.bitrate
-      }).map((format, index) => {
-        let label
-
-        switch (index) {
-          case 0:
-            label = this.$t('Video.Audio.Low')
-            break
-          case 1:
-            label = this.$t('Video.Audio.Medium')
-            break
-          case 2:
-            label = this.$t('Video.Audio.High')
-            break
-          case 3:
-            label = this.$t('Video.Audio.Best')
-            break
-          default:
-            label = format.bitrate.toString()
-        }
-
-        return {
-          url: format.freeTubeUrl,
-          type: format.mime_type,
-          label: 'Audio',
-          qualityLabel: label
-        }
-      }).reverse()
-    },
-
     addToHistory: function (watchProgress) {
       const videoData = {
         videoId: this.videoId,
@@ -997,27 +1083,23 @@ export default defineComponent({
         viewCount: this.videoViewCount,
         lengthSeconds: this.videoLengthSeconds,
         watchProgress: watchProgress,
-        timeWatched: new Date().getTime(),
+        timeWatched: Date.now(),
         isLive: false,
-        paid: false,
-        type: 'video'
+        type: 'video',
       }
 
       this.updateHistory(videoData)
     },
 
     handleWatchProgress: function () {
-      if (this.rememberHistory && !this.isUpcoming && !this.isLoading && !this.isLive) {
-        const player = this.$refs.videoPlayer.player
-
-        if (player !== null && this.saveWatchedProgress) {
-          const currentTime = this.getWatchedProgress()
-          const payload = {
-            videoId: this.videoId,
-            watchProgress: currentTime
-          }
-          this.updateWatchProgress(payload)
+      if (this.rememberHistory && this.saveWatchedProgress && !this.isUpcoming &&
+        !this.isLoading && !this.isLive && this.$refs.player?.hasLoaded) {
+        const currentTime = this.getWatchedProgress()
+        const payload = {
+          videoId: this.videoId,
+          watchProgress: currentTime
         }
+        this.updateWatchProgress(payload)
       }
     },
 
@@ -1026,98 +1108,90 @@ export default defineComponent({
       if (!(this.rememberHistory && this.saveVideoHistoryWithLastViewedPlaylist)) { return }
       if (this.isUpcoming || this.isLive) { return }
 
-      const payload = {
+      this.updateLastViewedPlaylist({
         videoId: this.videoId,
         // Whether there is a playlist ID or not, save it
-        lastViewedPlaylistId: this.$route.query?.playlistId,
-      }
-      this.updateLastViewedPlaylist(payload)
-    },
-
-    handleVideoReady: function () {
-      this.videoPlayerReady = true
-      this.checkIfWatched()
-    },
-
-    checkIfWatched: function () {
-      const historyIndex = this.historyCache.findIndex((video) => {
-        return video.videoId === this.videoId
+        lastViewedPlaylistId: this.playlistId,
+        lastViewedPlaylistType: this.playlistType,
+        lastViewedPlaylistItemId: this.playlistItemId,
       })
+    },
 
-      if (!this.isLive) {
-        if (this.timestamp) {
-          if (this.timestamp < 0) {
-            this.$refs.videoPlayer.player.currentTime(0)
-          } else if (this.timestamp > (this.videoLengthSeconds - 10)) {
-            this.$refs.videoPlayer.player.currentTime(this.videoLengthSeconds - 10)
+    isRecommendedVideoWatched: function (videoId) {
+      return !!this.$store.getters.getHistoryCacheById[videoId]
+    },
+
+    handleVideoLoaded: function () {
+      // will trigger again if you switch formats or change legacy quality
+      if (!this.videoPlayerLoaded) {
+        this.videoPlayerLoaded = true
+
+        if (this.rememberHistory) {
+          if (this.timestamp) {
+            this.addToHistory(this.timestamp)
+          } else if (this.historyEntryExists) {
+            this.addToHistory(this.historyEntry.watchProgress)
           } else {
-            this.$refs.videoPlayer.player.currentTime(this.timestamp)
+            this.addToHistory(0)
           }
-        } else if (this.saveWatchedProgress && historyIndex !== -1) {
-          // For UX consistency, no progress reading if writing disabled
-          const watchProgress = this.historyCache[historyIndex].watchProgress
 
-          if (watchProgress < (this.videoLengthSeconds - 10)) {
-            this.$refs.videoPlayer.player.currentTime(watchProgress)
-          }
-        }
-      }
-
-      if (this.rememberHistory) {
-        if (this.timestamp) {
-          this.addToHistory(this.timestamp)
-        } else if (historyIndex !== -1) {
-          this.addToHistory(this.historyCache[historyIndex].watchProgress)
-        } else {
-          this.addToHistory(0)
+          // Must be called AFTER history entry inserted
+          // Otherwise the value is not saved for first time watched videos
+          this.handlePlaylistPersisting()
         }
 
-        // Must be called AFTER history entry inserted
-        // Otherwise the value is not saved for first time watched videos
-        this.handlePlaylistPersisting()
+        this.updateLocalPlaylistLastPlayedAtSometimes()
       }
     },
 
     checkIfPlaylist: function () {
-      if (typeof (this.$route.query) !== 'undefined') {
-        this.playlistId = this.$route.query.playlistId
-
-        if (typeof (this.playlistId) !== 'undefined') {
-          this.watchingPlaylist = true
-        } else {
-          this.watchingPlaylist = false
-        }
-      } else {
+      if (this.$route.query == null) {
         this.watchingPlaylist = false
+        return
       }
+
+      this.playlistId = this.$route.query.playlistId
+      this.playlistItemId = this.$route.query.playlistItemId
+
+      if (this.playlistId == null || this.playlistId.length === 0) {
+        this.playlistType = ''
+        this.playlistItemId = null
+        this.watchingPlaylist = false
+        return
+      }
+
+      // `playlistId` present
+      if (this.selectedUserPlaylist != null) {
+        // If playlist ID matches a user playlist, it must be user playlist
+        this.playlistType = 'user'
+        this.watchingPlaylist = true
+        return
+      }
+
+      // Still possible to be a user playlist from history
+      // (but user playlist could be already removed)
+      this.playlistType = this.$route.query.playlistType
+      if (this.playlistType !== 'user') {
+        // Remote playlist
+        this.playlistItemId = null
+        this.watchingPlaylist = true
+        return
+      }
+
+      // At this point `playlistType === 'user'`
+      // But the playlist might be already removed
+      if (this.selectedUserPlaylist == null) {
+        // Clear playlist data so that watch history will be properly updated
+        this.playlistId = ''
+        this.playlistType = ''
+        this.playlistItemId = null
+      }
+      this.watchingPlaylist = this.selectedUserPlaylist != null
     },
 
     checkIfTimestamp: function () {
-      if (typeof (this.$route.query) !== 'undefined') {
-        try {
-          this.timestamp = parseInt(this.$route.query.timestamp)
-        } catch {
-          this.timestamp = null
-        }
-      }
-    },
-
-    getLegacyFormats: function () {
-      getLocalVideoInfo(this.videoId)
-        .then(result => {
-          this.videoSourceList = result.streaming_data.formats.map(mapLocalFormat)
-        })
-        .catch(err => {
-          const errorMessage = this.$t('Local API Error (Click to copy)')
-          showToast(`${errorMessage}: ${err}`, 10000, () => {
-            copyToClipboard(err)
-          })
-          console.error(err)
-          if (!process.env.IS_ELECTRON || (this.backendPreference === 'local' && this.backendFallback)) {
-            showToast(this.$t('Falling back to Invidious API'))
-            this.getVideoInformationInvidious()
-          }
-        })
+      const timestamp = parseInt(this.$route.query.timestamp)
+      this.timestamp = isNaN(timestamp) || timestamp < 0 ? null : timestamp
     },
 
     handleFormatChange: function (format) {
@@ -1139,23 +1213,12 @@ export default defineComponent({
         return
       }
 
-      if (this.dashSrc === null || this.isLive || this.isPostLiveDvr) {
+      if (this.manifestSrc === null) {
         showToast(this.$t('Change Format.Dash formats are not available for this video'))
         return
       }
-      const watchedProgress = this.getWatchedProgress()
-      this.activeFormat = 'dash'
-      this.hidePlayer = true
 
-      setTimeout(() => {
-        this.hidePlayer = false
-        setTimeout(() => {
-          const player = this.$refs.videoPlayer.player
-          if (player !== null) {
-            player.currentTime(watchedProgress)
-          }
-        }, 500)
-      }, 100)
+      this.activeFormat = 'dash'
     },
 
     enableLegacyFormat: function () {
@@ -1163,20 +1226,12 @@ export default defineComponent({
         return
       }
 
-      const watchedProgress = this.getWatchedProgress()
-      this.activeFormat = 'legacy'
-      this.activeSourceList = this.videoSourceList
-      this.hidePlayer = true
+      if (this.isLive || this.isPostLiveDvr || this.legacyFormats.length === 0) {
+        showToast(this.$t('Change Format.Legacy formats are not available for this video'))
+        return
+      }
 
-      setTimeout(() => {
-        this.hidePlayer = false
-        setTimeout(() => {
-          const player = this.$refs.videoPlayer.player
-          if (player !== null) {
-            player.currentTime(watchedProgress)
-          }
-        }, 500)
-      }, 100)
+      this.activeFormat = 'legacy'
     },
 
     enableAudioFormat: function () {
@@ -1184,51 +1239,64 @@ export default defineComponent({
         return
       }
 
-      if (this.audioSourceList === null) {
+      if (this.manifestSrc === null ||
+        ((this.isLive || this.isPostLiveDvr) &&
+        // The WEB HLS manifests only contain combined audio and video files, so we can't do audio only
+        // The IOS HLS manifests have audio-only streams
+          this.manifestMimeType === MANIFEST_TYPE_HLS && !this.manifestSrc.includes('/demuxed/1'))) {
         showToast(this.$t('Change Format.Audio formats are not available for this video'))
         return
       }
 
-      const watchedProgress = this.getWatchedProgress()
       this.activeFormat = 'audio'
-      this.activeSourceList = this.audioSourceList
-      this.hidePlayer = true
-
-      setTimeout(() => {
-        this.hidePlayer = false
-        setTimeout(() => {
-          const player = this.$refs.videoPlayer.player
-          if (player !== null) {
-            player.currentTime(watchedProgress)
-          }
-        }, 500)
-      }, 100)
     },
 
     handleVideoEnded: function () {
-      if ((!this.watchingPlaylist || !this.autoplayPlaylists) && !this.playNextVideo) {
+      if (!this.autoplayEnabled) {
         return
       }
 
-      if (this.watchingPlaylist && this.$refs.watchVideoPlaylist.shouldStopDueToPlaylistEnd) {
+      if (this.blockVideoAutoplay) {
+        showToast(this.$t('Autoplay Interruption Timer',
+          this.defaultAutoplayInterruptionIntervalHours,
+          {
+            autoplayInterruptionIntervalHours: this.defaultAutoplayInterruptionIntervalHours
+          }),
+        3_600_000
+        )
+        this.resetAutoplayInterruptionTimeout()
+        return
+      }
+
+      if (this.watchingPlaylist && this.$refs.watchVideoPlaylist?.shouldStopDueToPlaylistEnd) {
         // Let `watchVideoPlaylist` handle end of playlist, no countdown needed
         this.$refs.watchVideoPlaylist.playNextVideo()
         return
       }
+
+      let nextVideoId = null
+      if (!this.watchingPlaylist) {
+        nextVideoId = this.nextRecommendedVideo?.videoId
+        if (!nextVideoId) {
+          return
+        }
+      }
+
       const nextVideoInterval = this.defaultInterval
       this.playNextTimeout = setTimeout(() => {
-        const player = this.$refs.videoPlayer.player
-        if (player !== null && player.paused()) {
+        const player = this.$refs.player
+
+        if (player?.isPaused()) {
           if (this.watchingPlaylist) {
             this.$refs.watchVideoPlaylist.playNextVideo()
           } else {
-            const nextVideoId = this.recommendedVideos[0].videoId
             this.$router.push({
               path: `/watch/${nextVideoId}`
             })
             showToast(this.$t('Playing Next Video'))
           }
         }
+        this.playNextTimeout = null
       }, nextVideoInterval * 1000)
 
       let countDownTimeLeftInSecond = nextVideoInterval
@@ -1243,11 +1311,7 @@ export default defineComponent({
         // To avoid message flashing
         // `time` is manually tested to be 700
         const message = this.$tc('Playing Next Video Interval', countDownTimeLeftInSecond, { nextVideoInterval: countDownTimeLeftInSecond })
-        showToast(message, 700, () => {
-          clearTimeout(this.playNextTimeout)
-          clearInterval(this.playNextCountDownIntervalId)
-          showToast(this.$t('Canceled next video autoplay'))
-        })
+        showToast(message, 700, this.abortAutoplayCountdown)
 
         // At least this var should be updated AFTER showing the message
         countDownTimeLeftInSecond = countDownTimeLeftInSecond - 1
@@ -1257,142 +1321,204 @@ export default defineComponent({
       this.playNextCountDownIntervalId = setInterval(showCountDownMessage, 1000)
     },
 
-    handleRouteChange: async function (videoId) {
-      // if the user navigates to another video, the ipc call for the userdata path
-      // takes long enough for the video id to have already changed to the new one
-      // receiving it as an arg instead of accessing it ourselves means we always have the right one
-
+    abortAutoplayCountdown: function (hideToast = false) {
       clearTimeout(this.playNextTimeout)
       clearInterval(this.playNextCountDownIntervalId)
-      this.videoChapters = []
+      this.playNextTimeout = null
 
-      this.handleWatchProgress()
-
-      if (!this.isUpcoming && !this.isLoading) {
-        const player = this.$refs.videoPlayer.player
-
-        if (player !== null && !player.paused() && player.isInPictureInPicture()) {
-          setTimeout(() => {
-            player.play()
-            player.on('leavepictureinpicture', (event) => {
-              const watchTime = player.currentTime()
-              if (this.$route.fullPath.includes('/watch')) {
-                const routeId = this.$route.params.id
-                if (routeId === videoId) {
-                  this.$refs.videoPlayer.$refs.video.currentTime = watchTime
-                }
-              }
-
-              player.pause()
-              player.dispose()
-            })
-          }, 200)
-        }
-      }
-
-      if (process.env.IS_ELECTRON && this.removeVideoMetaFiles) {
-        if (process.env.NODE_ENV === 'development') {
-          const dashFileLocation = `static/dashFiles/${videoId}.xml`
-          const vttFileLocation = `static/storyboards/${videoId}.vtt`
-          // only delete the file it actually exists
-          if (await pathExists(dashFileLocation)) {
-            await fs.rm(dashFileLocation)
-          }
-          if (await pathExists(vttFileLocation)) {
-            await fs.rm(vttFileLocation)
-          }
-        } else {
-          const userData = await getUserDataPath()
-          const dashFileLocation = `${userData}/dashFiles/${videoId}.xml`
-          const vttFileLocation = `${userData}/storyboards/${videoId}.vtt`
-
-          if (await pathExists(dashFileLocation)) {
-            await fs.rm(dashFileLocation)
-          }
-          if (await pathExists(vttFileLocation)) {
-            await fs.rm(vttFileLocation)
-          }
-        }
+      if (!hideToast) {
+        showToast(this.$t('Canceled next video autoplay'))
       }
     },
 
-    handleVideoError: function (error) {
-      console.error(error)
-      if (this.isLive) {
-        return
+    handleRouteChange: function () {
+      this.abortAutoplayCountdown(true)
+      this.videoChapters = []
+      this.videoChaptersKind = 'chapters'
+
+      this.handleWatchProgress()
+    },
+
+    /**
+     * @param {import('shaka-player/dist/shaka-player.ui').default.util.Error} error
+     */
+    handlePlayerError: function (error) {
+      // the error is logged to the console inside the player so we don't have to do it here
+
+      const { Code } = shaka.util.Error
+
+      if (error.code === Code.HTTP_ERROR) {
+        if (error.data[1]?.message === 'Failed to fetch' && !navigator.onLine) {
+          // Internet connection was lost, do nothing on our side as
+          // shaka-player will keep trying until the internet connection returns and resume playback automatically when it does
+          return
+        }
+      } else if (error.code === Code.BAD_HTTP_STATUS) {
+        switch (error.data[1]) {
+          case 429:
+            this.handleWatchProgress()
+
+            this.errorMessage = '[BAD_HTTP_STATUS: 429] Ratelimited'
+            return
+          case 403:
+            this.handleWatchProgress()
+
+            if (new Date() > this.streamingDataExpiryDate) {
+              this.errorMessage = '[BAD_HTTP_STATUS: 403] YouTube watch session expired. Please reopen this video.'
+              this.customErrorIcon = ['fas', 'clock']
+              return
+            }
+
+            if (this.videoGenreIsMusic) {
+              this.errorMessage = '[BAD_HTTP_STATUS: 403] Potential causes: IP block, streaming URL deciphering failed or music video geo-block'
+            } else {
+              this.errorMessage = '[BAD_HTTP_STATUS: 403] Potential causes: IP block or streaming URL deciphering failed'
+            }
+            return
+        }
+      } else if (error.code === Code.VIDEO_ERROR) {
+        if (this.activeFormat === 'legacy') {
+          if (new Date() > this.streamingDataExpiryDate) {
+            this.handleWatchProgress()
+
+            this.errorMessage = '[VIDEO_ERROR] YouTube watch session expired. Please reopen this video.'
+            this.customErrorIcon = ['fas', 'clock']
+            return
+          }
+        }
       }
 
-      if (error.code === 4) {
+      if (this.isLive || this.isPostLiveDvr) {
+        // live streams don't have legacy formats, so only switch between dash and audio
+
         if (this.activeFormat === 'dash') {
-          console.warn(
-            'Unable to play dash formats.  Reverting to legacy formats...'
-          )
-          this.enableLegacyFormat()
+          console.error('Unable to play DASH formats. Reverting to audio formats...')
+          this.enableAudioFormat()
         } else {
+          console.error('Unable to play audio formats. Reverting to DASH formats...')
           this.enableDashFormat()
+        }
+      } else {
+        // loop through formats DASH -> legacy -> audio -> DASH
+
+        switch (this.activeFormat) {
+          case 'dash':
+            console.error('Unable to play DASH formats. Reverting to legacy formats...')
+            this.enableLegacyFormat()
+            break
+          case 'legacy':
+            console.error('Unable to play legacy formats. Reverting to audio formats...')
+            this.enableAudioFormat()
+            break
+          case 'audio':
+            console.error('Unable to play audio formats. Reverting to DASH formats...')
+            this.enableDashFormat()
+            break
         }
       }
     },
 
     /**
      * @param {import('youtubei.js').YT.VideoInfo} videoInfo
+     * @param {boolean} includeThumbnails
      */
-    createLocalDashManifest: async function (videoInfo) {
-      const xmlData = await videoInfo.toDash()
-      const userData = await getUserDataPath()
-      let fileLocation
-      let uriSchema
-      if (process.env.NODE_ENV === 'development') {
-        fileLocation = `static/dashFiles/${this.videoId}.xml`
-        uriSchema = `dashFiles/${this.videoId}.xml`
-        // if the location does not exist, writeFileSync will not create the directory, so we have to do that manually
-        if (!(await pathExists('static/dashFiles/'))) {
-          await fs.mkdir('static/dashFiles/')
-        }
+    createLocalDashManifest: async function (videoInfo, includeThumbnails = false) {
+      const xmlData = await videoInfo.toDash(undefined, undefined, {
+        include_thumbnails: includeThumbnails
+      })
 
-        if (await pathExists(fileLocation)) {
-          await fs.rm(fileLocation)
-        }
-        await fs.writeFile(fileLocation, xmlData)
-      } else {
-        fileLocation = `${userData}/dashFiles/${this.videoId}.xml`
-        uriSchema = `file://${fileLocation}`
-
-        if (!(await pathExists(`${userData}/dashFiles/`))) {
-          await fs.mkdir(`${userData}/dashFiles/`)
-        }
-
-        await fs.writeFile(fileLocation, xmlData)
-      }
-
-      return [
-        {
-          url: uriSchema,
-          type: 'application/dash+xml',
-          label: 'Dash',
-          qualityLabel: 'Auto'
-        }
-      ]
+      return `data:application/dash+xml;charset=UTF-8,${encodeURIComponent(xmlData)}`
     },
 
-    createInvidiousDashManifest: function () {
-      let url = `${this.currentInvidiousInstance}/api/manifest/dash/id/${this.videoId}`
+    createInvidiousDashManifest: async function (result) {
+      let url = `${this.currentInvidiousInstanceUrl}/api/manifest/dash/id/${this.videoId}`
 
-      if (!process.env.IS_ELECTRON || this.proxyVideos) {
+      // If we are in Electron,
+      // we can use YouTube.js' DASH manifest generator to generate the manifest.
+      // Using YouTube.js' gives us support for multiple audio tracks (currently not supported by Invidious)
+      if (process.env.SUPPORTS_LOCAL_API) {
+        const adaptiveFormats = await this.getAdaptiveFormatsInvidious(result)
+
+        /** @type {import('youtubei.js').Misc.Format[]} */
+        const formats = []
+
+        /** @type {import('youtubei.js').Misc.Format[]} */
+        const audioFormats = []
+
+        let hasMultipleAudioTracks = false
+
+        for (const format of adaptiveFormats) {
+          const localFormat = convertInvidiousToLocalFormat(format)
+
+          if (localFormat.has_audio) {
+            audioFormats.push(localFormat)
+
+            if (localFormat.is_dubbed || localFormat.is_descriptive || localFormat.is_secondary || localFormat.is_auto_dubbed) {
+              hasMultipleAudioTracks = true
+            }
+          }
+
+          formats.push(localFormat)
+        }
+
+        if (hasMultipleAudioTracks) {
+          // match YouTube's local API response with English
+          const languageNames = new Intl.DisplayNames('en-US', { type: 'language', languageDisplay: 'standard' })
+          for (const format of audioFormats) {
+            this.generateAudioTrackFieldInvidious(format, languageNames)
+          }
+        }
+
+        const manifest = await generateInvidiousDashManifestLocally(formats)
+
+        url = `data:application/dash+xml;charset=UTF-8,${encodeURIComponent(manifest)}`
+      } else if (this.proxyVideos) {
         url += '?local=true'
       }
 
-      return [
-        {
-          url: url,
-          type: 'application/dash+xml',
-          label: 'Dash',
-          qualityLabel: 'Auto'
-        }
-      ]
+      return url
     },
 
-    getAdaptiveFormatsInvidious: async function(existingInfoResult = null) {
+    /**
+     * @param {import('youtubei.js').Misc.Format} format
+     * @param {Intl.DisplayNames} languageNames
+     */
+    generateAudioTrackFieldInvidious: function (format, languageNames) {
+      let type = ''
+
+      // use the same id numbers as YouTube (except -1, when we aren't sure what it is)
+      let idNumber = ''
+
+      if (format.is_descriptive) {
+        type = ' descriptive'
+        idNumber = 2
+      } else if (format.is_dubbed) {
+        type = ''
+        idNumber = 3
+      } else if (format.is_original) {
+        type = ' original'
+        idNumber = 4
+      } else if (format.is_secondary) {
+        type = ' secondary'
+        idNumber = 6
+      } else if (format.is_auto_dubbed) {
+        type = ''
+        idNumber = 10
+      } else {
+        type = ' alternative'
+        idNumber = -1
+      }
+
+      const languageName = languageNames.of(format.language)
+
+      format.audio_track = {
+        audio_is_default: !!format.is_original,
+        id: `${format.language}.${idNumber}`,
+        display_name: `${languageName}${type}`
+      }
+    },
+
+    getAdaptiveFormatsInvidious: async function (existingInfoResult = null) {
       let result
       if (existingInfoResult) {
         result = existingInfoResult
@@ -1400,141 +1526,98 @@ export default defineComponent({
         result = await invidiousGetVideoInformation(this.videoId)
       }
 
-      return filterInvidiousFormats(result.adaptiveFormats, this.allowDashAv1Formats)
-        .map((format) => {
-          format.bitrate = parseInt(format.bitrate)
-          if (typeof format.resolution === 'string') {
-            format.height = parseInt(format.resolution.replace('p', ''))
-          }
-          return format
-        })
+      result.adaptiveFormats.forEach((format) => {
+        format.bitrate = parseInt(format.bitrate)
+
+        // audio streams don't have a size property
+        if (typeof format.size === 'string') {
+          const [stringWidth, stringHeight] = format.size.split('x')
+
+          format.width = parseInt(stringWidth)
+          format.height = parseInt(stringHeight)
+        }
+      })
+
+      return result.adaptiveFormats
     },
 
-    createLocalStoryboardUrls: async function (storyboardInfo) {
+    /**
+     * @param {import('youtubei.js/dist/src/parser/classes/PlayerStoryboardSpec').StoryboardData} storyboardInfo
+     * @returns {string}
+     */
+    createLocalStoryboardUrls: function (storyboardInfo) {
       const results = buildVTTFileLocally(storyboardInfo, this.videoLengthSeconds)
-      const userData = await getUserDataPath()
-      let fileLocation
-      let uriSchema
 
-      // Dev mode doesn't have access to the file:// schema, so we access
-      // storyboards differently when run in dev
-      if (process.env.NODE_ENV === 'development') {
-        fileLocation = `static/storyboards/${this.videoId}.vtt`
-        uriSchema = `storyboards/${this.videoId}.vtt`
-        // if the location does not exist, writeFile will not create the directory, so we have to do that manually
-        if (!(await pathExists('static/storyboards/'))) {
-          fs.mkdir('static/storyboards/')
-        } else if (await pathExists(fileLocation)) {
-          await fs.rm(fileLocation)
-        }
+      return `data:text/vtt;charset=utf-8,${encodeURIComponent(results)}`
+    },
 
-        await fs.writeFile(fileLocation, results)
+    /**
+     * @param {import('youtubei.js').YTNodes.PlayerCaptionsTracklist} captions
+     * @param {Set<string>} userLanguages
+     * @returns {null|{ url: string, label: string, language: string, mimeType: string, isAutotranslated: boolean }}
+     */
+    getTranslatedLocaleCaption: function (captions, userLanguages) {
+      // check if we can translate to the users language
+      const translationLanguage = captions.translation_languages.find(language => userLanguages.has(language.language_code))
+
+      let translationName, translationCode
+      // otherwise just fallback to the FreeTube display language and hope that YouTube will be able to handle it
+      if (!translationLanguage) {
+        translationName = this.$t('Locale Name')
+        translationCode = userLanguages.values().next().value
       } else {
-        if (!(await pathExists(`${userData}/storyboards/`))) {
-          await fs.mkdir(`${userData}/storyboards/`)
-        }
-        fileLocation = `${userData}/storyboards/${this.videoId}.vtt`
-        uriSchema = `file://${fileLocation}`
-
-        await fs.writeFile(fileLocation, results)
+        translationName = translationLanguage.language_name.text
+        translationCode = translationLanguage.language_code
       }
 
-      this.videoStoryboardSrc = uriSchema
-    },
+      let trackToTranslate
 
-    tryAddingTranslatedLocaleCaption: function (captionTracks, locale, baseUrl) {
-      const enCaptionIdx = captionTracks.findIndex(track =>
-        track.language_code === 'en' && track.kind !== 'asr'
-      )
+      const autoGeneratedCaptionTrack = captions.caption_tracks.find(track => track.kind === 'asr')
+      if (autoGeneratedCaptionTrack) {
+        // Check if there is a user uploaded caption track in the language of the video, as that is more trustworthy than auto-generated captions
+        const userUploadedCaptionTrack = captions.caption_tracks.find(track => track.kind !== 'asr' && track.language_code === autoGeneratedCaptionTrack.language_code)
 
-      const enCaptionExists = enCaptionIdx !== -1
-      const asrEnabled = captionTracks.some(track => track.kind === 'asr')
-
-      if (enCaptionExists || asrEnabled) {
-        let label
-        let url
-
-        if (this.$te('Video.translated from English') && this.$t('Video.translated from English') !== '') {
-          label = `${this.$t('Locale Name')} (${this.$t('Video.translated from English')})`
-        } else {
-          label = `${this.$t('Locale Name')} (translated from English)`
-        }
-
-        const indexTranslated = captionTracks.findIndex((item) => {
-          return item.label === label
-        })
-        if (indexTranslated !== -1) {
-          return
-        }
-
-        if (enCaptionExists) {
-          url = new URL(captionTracks[enCaptionIdx].url)
-        } else {
-          url = new URL(baseUrl)
-          url.searchParams.set('lang', 'en')
-          url.searchParams.set('kind', 'asr')
-        }
-
-        url.searchParams.set('tlang', locale)
-        captionTracks.unshift({
-          url: url.toString(),
-          label,
-          language_code: locale
-        })
+        // Fallback to the auto-generated track if there is no user uploaded one that matches the video language
+        trackToTranslate = userUploadedCaptionTrack ?? autoGeneratedCaptionTrack
+      } else {
+        // if there is no auto-generated track choose the first translatable track
+        trackToTranslate = captions.caption_tracks.find(track => track.is_translatable) ?? captions.caption_tracks[0]
       }
-    },
 
-    createCaptionPromiseList: function (captionTracks) {
-      return captionTracks.map(caption => new Promise((resolve, reject) => {
-        caption.type = 'text/vtt'
-        caption.charset = 'charset=utf-8'
-        caption.dataSource = 'local'
+      const url = new URL(trackToTranslate.base_url)
+      url.searchParams.set('fmt', 'vtt')
+      url.searchParams.set('tlang', translationCode)
 
-        const url = new URL(caption.url)
-        url.searchParams.set('fmt', 'vtt')
+      const label = this.$t('Video.Player.TranslatedCaptionTemplate', {
+        language: translationName,
+        originalLanguage: trackToTranslate.name.text
+      })
 
-        fetch(url)
-          .then((response) => response.text())
-          .then((text) => {
-            // The character '#' needs to be percent-encoded in a (data) URI
-            // because it signals an identifier, which means anything after it
-            // is automatically removed when the URI is used as a source
-            let vtt = text.replaceAll('#', '%23')
-
-            // A lot of videos have messed up caption positions that need to be removed
-            // This can be either because this format isn't really used by YouTube
-            // or because it's expected for the player to be able to somehow
-            // wrap the captions so that they won't step outside its boundaries
-            //
-            // Auto-generated captions are also all aligned to the start
-            // so those instances must also be removed
-            // In addition, all aligns seem to be fixed to "start" when they do pop up in normal captions
-            // If it's prominent enough that people start to notice, it can be removed then
-            if (caption.kind === 'asr') {
-              vtt = vtt.replaceAll(/ align:start| position:\d{1,3}%/g, '')
-            } else {
-              vtt = vtt.replaceAll(/ position:\d{1,3}%/g, '')
-            }
-
-            caption.url = `data:${caption.type};${caption.charset},${vtt}`
-            resolve(caption)
-          })
-          .catch((error) => {
-            console.error(error)
-            reject(error)
-          })
-      }))
+      return {
+        url: url.toString(),
+        label,
+        language: translationCode,
+        mimeType: 'text/vtt',
+        isAutotranslated: true
+      }
     },
 
     pausePlayer: function () {
-      const player = this.$refs.videoPlayer.player
-      if (player && !player.paused()) {
+      const player = this.$refs.player
+
+      if (player && !player.isPaused()) {
         player.pause()
       }
     },
 
     getWatchedProgress: function () {
-      return this.$refs.videoPlayer && this.$refs.videoPlayer.player ? this.$refs.videoPlayer.player.currentTime() : 0
+      const player = this.$refs.player
+
+      if (!this.isLoading && player?.hasLoaded) {
+        return player.getCurrentTime()
+      }
+
+      return 0
     },
 
     getTimestamp: function () {
@@ -1544,8 +1627,8 @@ export default defineComponent({
     getPlaylistIndex: function () {
       return this.$refs.watchVideoPlaylist
         ? this.getPlaylistReverse()
-          ? this.$refs.watchVideoPlaylist.playlistItems.length - this.$refs.watchVideoPlaylist.currentVideoIndex
-          : this.$refs.watchVideoPlaylist.currentVideoIndex - 1
+          ? this.$refs.watchVideoPlaylist.playlistItems.length - this.$refs.watchVideoPlaylist.currentVideoIndexOneBased
+          : this.$refs.watchVideoPlaylist.currentVideoIndexZeroBased
         : -1
     },
 
@@ -1562,14 +1645,56 @@ export default defineComponent({
     },
 
     updateTitle: function () {
-      document.title = `${this.videoTitle} - FreeTube`
+      this.setAppTitle(`${this.videoTitle} - ${packageDetails.productName}`)
+    },
+
+    isHiddenVideo: function (forbiddenTitles, channelsHidden, video) {
+      return channelsHidden.some(ch => ch.name === video.authorId) ||
+        channelsHidden.some(ch => ch.name === video.author) ||
+        forbiddenTitles.some((text) => video.title?.toLowerCase().includes(text.toLowerCase()))
+    },
+
+    toggleAutoplay: function() {
+      if (this.autoplayEnabled && this.playNextTimeout) {
+        this.abortAutoplayCountdown()
+      }
+
+      if (this.watchingPlaylist) {
+        this.updateAutoplayPlaylists(!this.autoplayEnabled)
+      } else {
+        this.updatePlayNextVideo(!this.autoplayEnabled)
+      }
+    },
+
+    updateLocalPlaylistLastPlayedAtSometimes() {
+      if (this.selectedUserPlaylist == null) { return }
+
+      const playlist = this.selectedUserPlaylist
+      this.updatePlaylistLastPlayedAt({ _id: playlist._id })
+    },
+
+    resetAutoplayInterruptionTimeout() {
+      clearTimeout(this.autoplayInterruptionTimeout)
+      this.autoplayInterruptionTimeout = setTimeout(() => { this.blockVideoAutoplay = true }, this.defaultAutoplayInterruptionIntervalHours * 3_600_000)
+      this.blockVideoAutoplay = false
+    },
+
+    updatePlaybackRate(newRate) {
+      this.currentPlaybackRate = newRate
     },
 
     ...mapActions([
       'updateHistory',
+      'updateAutoplayPlaylists',
+      'updatePlayNextVideo',
       'updateWatchProgress',
       'updateLastViewedPlaylist',
-      'updateSubscriptionDetails'
+      'updatePlaylistLastPlayedAt',
+      'updateSubscriptionDetails',
+    ]),
+
+    ...mapMutations([
+      'setAppTitle'
     ])
   }
 })

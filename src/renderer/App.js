@@ -1,22 +1,24 @@
-import Vue, { defineComponent } from 'vue'
+import { defineComponent } from 'vue'
 import { mapActions, mapMutations } from 'vuex'
-import { ObserveVisibility } from 'vue-observe-visibility'
 import FtFlexBox from './components/ft-flex-box/ft-flex-box.vue'
 import TopNav from './components/top-nav/top-nav.vue'
-import SideNav from './components/side-nav/side-nav.vue'
+import SideNav from './components/SideNav/SideNav.vue'
 import FtNotificationBanner from './components/ft-notification-banner/ft-notification-banner.vue'
-import FtPrompt from './components/ft-prompt/ft-prompt.vue'
+import FtPrompt from './components/FtPrompt/FtPrompt.vue'
 import FtButton from './components/ft-button/ft-button.vue'
 import FtToast from './components/ft-toast/ft-toast.vue'
-import FtProgressBar from './components/ft-progress-bar/ft-progress-bar.vue'
+import FtProgressBar from './components/FtProgressBar/FtProgressBar.vue'
+import FtPlaylistAddVideoPrompt from './components/ft-playlist-add-video-prompt/ft-playlist-add-video-prompt.vue'
+import FtCreatePlaylistPrompt from './components/ft-create-playlist-prompt/ft-create-playlist-prompt.vue'
+import FtKeyboardShortcutPrompt from './components/FtKeyboardShortcutPrompt/FtKeyboardShortcutPrompt.vue'
+import FtSearchFilters from './components/FtSearchFilters/FtSearchFilters.vue'
 import { marked } from 'marked'
-import { Injectables, IpcChannels } from '../constants'
+import { IpcChannels } from '../constants'
 import packageDetails from '../../package.json'
 import { openExternalLink, openInternalPath, showToast } from './helpers/utils'
+import { translateWindowTitle } from './helpers/strings'
 
 let ipcRenderer = null
-
-Vue.directive('observe-visibility', ObserveVisibility)
 
 export default defineComponent({
   name: 'App',
@@ -28,17 +30,15 @@ export default defineComponent({
     FtPrompt,
     FtButton,
     FtToast,
-    FtProgressBar
-  },
-  provide: function () {
-    return {
-      [Injectables.SHOW_OUTLINES]: this.showOutlines
-    }
+    FtProgressBar,
+    FtPlaylistAddVideoPrompt,
+    FtCreatePlaylistPrompt,
+    FtSearchFilters,
+    FtKeyboardShortcutPrompt,
   },
   data: function () {
     return {
       dataReady: false,
-      hideOutlines: true,
       showUpdatesBanner: false,
       showBlogBanner: false,
       showReleaseNotes: false,
@@ -47,6 +47,7 @@ export default defineComponent({
       latestBlogUrl: '',
       updateChangelog: '',
       changeLogTitle: '',
+      isPromptOpen: false,
       lastExternalLinkToBeOpened: '',
       showExternalLinkOpeningPrompt: false,
       externalLinkOpeningPromptValues: [
@@ -59,8 +60,12 @@ export default defineComponent({
     showProgressBar: function () {
       return this.$store.getters.getShowProgressBar
     },
-    isRightAligned: function () {
-      return this.locale === 'ar' || this.locale === 'he'
+    outlinesHidden: function () {
+      return this.$store.getters.getOutlinesHidden
+    },
+    isLocaleRightToLeft: function () {
+      return this.locale === 'ar' || this.locale === 'fa' || this.locale === 'he' ||
+        this.locale === 'ur' || this.locale === 'yi' || this.locale === 'ku'
     },
     checkForUpdates: function () {
       return this.$store.getters.getCheckForUpdates
@@ -68,15 +73,26 @@ export default defineComponent({
     checkForBlogPosts: function () {
       return this.$store.getters.getCheckForBlogPosts
     },
+    isKeyboardShortcutPromptShown: function () {
+      return this.$store.getters.getIsKeyboardShortcutPromptShown
+    },
+    showAddToPlaylistPrompt: function () {
+      return this.$store.getters.getShowAddToPlaylistPrompt
+    },
+    showCreatePlaylistPrompt: function () {
+      return this.$store.getters.getShowCreatePlaylistPrompt
+    },
+    showSearchFilters: function () {
+      return this.$store.getters.getShowSearchFilters
+    },
     windowTitle: function () {
-      const routeTitle = this.$route.meta.title
-      if (routeTitle !== 'Channel' && routeTitle !== 'Watch' && routeTitle !== 'Hashtag') {
-        let title =
-        this.$route.meta.path === '/home'
-          ? packageDetails.productName
-          : `${this.$t(this.$route.meta.title)} - ${packageDetails.productName}`
+      const routePath = this.$route.path
+      if (!routePath.startsWith('/channel/') && !routePath.startsWith('/watch/') && !routePath.startsWith('/hashtag/') && !routePath.startsWith('/playlist/') && !routePath.startsWith('/search/')) {
+        let title = translateWindowTitle(this.$route.meta.title)
         if (!title) {
           title = packageDetails.productName
+        } else {
+          title = `${title} - ${packageDetails.productName}`
         }
         return title
       } else {
@@ -86,12 +102,21 @@ export default defineComponent({
     externalPlayer: function () {
       return this.$store.getters.getExternalPlayer
     },
+
     defaultInvidiousInstance: function () {
       return this.$store.getters.getDefaultInvidiousInstance
     },
 
     baseTheme: function () {
       return this.$store.getters.getBaseTheme
+    },
+
+    isSideNavOpen: function () {
+      return this.$store.getters.getIsSideNavOpen
+    },
+
+    hideLabelsSideBar: function () {
+      return this.$store.getters.getHideLabelsSideBar
     },
 
     mainColor: function () {
@@ -103,22 +128,34 @@ export default defineComponent({
     },
 
     locale: function() {
-      return this.$i18n.locale.replace('_', '-')
+      return this.$i18n.locale
     },
 
     systemTheme: function () {
       return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
     },
 
+    landingPage: function() {
+      return '/' + this.$store.getters.getLandingPage
+    },
+
     externalLinkOpeningPromptNames: function () {
       return [
-        this.$t('Yes'),
+        this.$t('Yes, Open Link'),
         this.$t('No')
       ]
     },
 
     externalLinkHandling: function () {
       return this.$store.getters.getExternalLinkHandling
+    },
+
+    appTitle: function () {
+      return this.$store.getters.getAppTitle
+    },
+
+    openDeepLinksInNewWindow: function () {
+      return this.$store.getters.getOpenDeepLinksInNewWindow
     }
   },
   watch: {
@@ -132,35 +169,37 @@ export default defineComponent({
 
     locale: 'setLocale',
 
-    $route () {
-      // react to route changes...
-      // Hide top nav filter panel on page change
-      this.$refs.topNav.hideFilters()
-    }
+    appTitle: 'setDocumentTitle'
   },
   created () {
     this.checkThemeSettings()
-    this.setWindowTitle()
     this.setLocale()
   },
   mounted: function () {
     this.grabUserSettings().then(async () => {
       this.checkThemeSettings()
 
-      await this.fetchInvidiousInstances()
+      await this.fetchInvidiousInstancesFromFile()
       if (this.defaultInvidiousInstance === '') {
         await this.setRandomCurrentInvidiousInstance()
       }
 
+      this.fetchInvidiousInstances().then(e => {
+        if (this.defaultInvidiousInstance === '') {
+          this.setRandomCurrentInvidiousInstance()
+        }
+      })
+
       this.grabAllProfiles(this.$t('Profile.All Channels')).then(async () => {
         this.grabHistory()
         this.grabAllPlaylists()
+        this.grabAllSubscriptions()
+        this.grabSearchHistoryEntries()
 
         if (process.env.IS_ELECTRON) {
           ipcRenderer = require('electron').ipcRenderer
           this.setupListenersToSyncWindows()
           this.activateKeyboardShortcuts()
-          this.activateIPCListeners()
           this.openAllLinksExternally()
           this.enableSetSearchQueryText()
           this.enableOpenUrl()
@@ -176,12 +215,20 @@ export default defineComponent({
         }, 500)
       })
 
-      this.$router.afterEach((to, from) => {
-        this.$refs.topNav.navigateHistory()
+      this.$router.onReady(() => {
+        if (this.$router.currentRoute.path === '/') {
+          this.$router.replace({ path: this.landingPage })
+        }
+
+        this.setWindowTitle()
       })
     })
   },
   methods: {
+    setDocumentTitle: function(value) {
+      document.title = value
+      this.$nextTick(() => this.$refs.topNav?.setActiveNavigationHistoryEntryTitle(value))
+    },
     checkThemeSettings: function () {
       const theme = {
         baseTheme: this.baseTheme || 'dark',
@@ -206,7 +253,17 @@ export default defineComponent({
           .then((json) => {
             const tagName = json[0].tag_name
             const versionNumber = tagName.replace('v', '').replace('-beta', '')
-            this.updateChangelog = marked.parse(json[0].body)
+
+            let changelog = json[0].body
+              // Link usernames to their GitHub profiles
+              .replaceAll(/@(\S+)\b/g, '[@$1](https://github.com/$1)')
+              // Shorten pull request links to #1234
+              .replaceAll(/https:\/\/github\.com\/FreeTubeApp\/FreeTube\/pull\/(\d+)/g, '[#$1]($&)')
+
+            // Add the title
+            changelog = `${changelog}`
+
+            this.updateChangelog = marked.parse(changelog)
             this.changeLogTitle = json[0].name
 
             this.updateBannerMessage = this.$t('Version {versionNumber} is now available!  Click for more details', { versionNumber })
@@ -258,10 +315,7 @@ export default defineComponent({
     },
 
     checkExternalPlayer: async function () {
-      const payload = {
-        externalPlayer: this.externalPlayer
-      }
-      this.getExternalPlayerCmdArgumentsData(payload)
+      this.getExternalPlayerCmdArgumentsData()
     },
 
     handleUpdateBannerClick: function (response) {
@@ -280,6 +334,10 @@ export default defineComponent({
       this.showBlogBanner = false
     },
 
+    handlePromptPortalUpdate: function(newVal) {
+      this.isPromptOpen = newVal
+    },
+
     openDownloadsPage: function () {
       const url = 'https://freetubeapp.io#download'
       openExternalLink(url)
@@ -290,21 +348,16 @@ export default defineComponent({
     activateKeyboardShortcuts: function () {
       document.addEventListener('keydown', this.handleKeyboardShortcuts)
       document.addEventListener('mousedown', () => {
-        this.hideOutlines = true
-      })
-    },
-
-    activateIPCListeners: function () {
-      // handle menu event updates from main script
-      ipcRenderer.on('history-back', (_event) => {
-        this.$refs.topNav.historyBack()
-      })
-      ipcRenderer.on('history-forward', (_event) => {
-        this.$refs.topNav.historyForward()
+        this.hideOutlines()
       })
     },
 
     handleKeyboardShortcuts: function (event) {
+      // ignore user typing in HTML `input` elements
+      if (event.shiftKey && event.key === '?' && event.target.tagName !== 'INPUT') {
+        this.$store.commit('setIsKeyboardShortcutPromptShown', !this.isKeyboardShortcutPromptShown)
+      }
+
       if (event.altKey) {
         switch (event.key) {
           case 'D':
@@ -315,7 +368,7 @@ export default defineComponent({
       }
       switch (event.key) {
         case 'Tab':
-          this.hideOutlines = false
+          this.showOutlines()
           break
         case 'L':
         case 'l':
@@ -428,6 +481,17 @@ export default defineComponent({
             break
           }
 
+          case 'post': {
+            const { postId, query } = result
+
+            openInternalPath({
+              path: `/post/${postId}`,
+              query,
+              doCreateNewWindow
+            })
+            break
+          }
+
           case 'channel': {
             const { channelId, subPath, url } = result
 
@@ -448,12 +512,7 @@ export default defineComponent({
 
           default: {
             // Unknown URL type
-            let message = 'Unknown YouTube url type, cannot be opened in app'
-            if (this.$te(message) && this.$t(message) !== '') {
-              message = this.$t(message)
-            }
-
-            showToast(message)
+            showToast(this.$t('Unknown YouTube url type, cannot be opened in app'))
           }
         }
       })
@@ -470,23 +529,23 @@ export default defineComponent({
     },
 
     enableSetSearchQueryText: function () {
-      ipcRenderer.on('updateSearchInputText', (event, searchQueryText) => {
+      ipcRenderer.on(IpcChannels.UPDATE_SEARCH_INPUT_TEXT, (event, searchQueryText) => {
         if (searchQueryText) {
           this.$refs.topNav.updateSearchInputText(searchQueryText)
         }
       })
 
-      ipcRenderer.send('searchInputHandlingReady')
+      ipcRenderer.send(IpcChannels.SEARCH_INPUT_HANDLING_READY)
     },
 
     enableOpenUrl: function () {
-      ipcRenderer.on('openUrl', (event, url) => {
+      ipcRenderer.on(IpcChannels.OPEN_URL, (event, url, { isLaunchLink = false } = { }) => {
         if (url) {
-          this.handleYoutubeLink(url)
+          this.handleYoutubeLink(url, { doCreateNewWindow: this.openDeepLinksInNewWindow && !isLaunchLink })
         }
       })
 
-      ipcRenderer.send('appReady')
+      ipcRenderer.send(IpcChannels.APP_READY)
     },
 
     handleExternalLinkOpeningPromptAnswer: function (option) {
@@ -503,40 +562,43 @@ export default defineComponent({
 
     setWindowTitle: function() {
       if (this.windowTitle !== null) {
-        document.title = this.windowTitle
+        this.setAppTitle(this.windowTitle)
       }
     },
 
     setLocale: function() {
       document.documentElement.setAttribute('lang', this.locale)
+      if (this.isLocaleRightToLeft) {
+        document.body.dir = 'rtl'
+      } else {
+        document.body.dir = 'ltr'
+      }
     },
-
-    /**
-     * provided to all child components, see `provide` near the top of this file
-     * after injecting it, they can show outlines during keyboard navigation
-     * e.g. cycling through tabs with the arrow keys
-     */
-    showOutlines: function () {
-      this.hideOutlines = false
-    },
-
-    ...mapMutations([
-      'setInvidiousInstancesList'
-    ]),
 
     ...mapActions([
       'grabUserSettings',
       'grabAllProfiles',
       'grabHistory',
       'grabAllPlaylists',
+      'grabAllSubscriptions',
+      'grabSearchHistoryEntries',
       'getYoutubeUrlInfo',
       'getExternalPlayerCmdArgumentsData',
       'fetchInvidiousInstances',
+      'fetchInvidiousInstancesFromFile',
       'setRandomCurrentInvidiousInstance',
       'setupListenersToSyncWindows',
+      'hideKeyboardShortcutPrompt',
+      'showKeyboardShortcutPrompt',
       'updateBaseTheme',
       'updateMainColor',
-      'updateSecColor'
+      'updateSecColor',
+      'showOutlines',
+      'hideOutlines',
+    ]),
+
+    ...mapMutations([
+      'setAppTitle'
     ])
   }
 })

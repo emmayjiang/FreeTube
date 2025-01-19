@@ -42,7 +42,15 @@
       v-else
       class="relative"
     >
-      <h4>{{ $t("Video.Live Chat") }}</h4>
+      <h4>
+        {{ $t("Video.Live Chat") }}
+        <span
+          v-if="!hideVideoViews && watchingCount !== null"
+          class="watchingCount"
+        >
+          {{ $tc('Global.Counts.Watching Count', watchingCount, { count: formattedWatchingCount }) }}
+        </span>
+      </h4>
       <div
         v-if="superChatComments.length > 0"
         class="superChatComments"
@@ -118,8 +126,9 @@
       <div
         ref="liveChatComments"
         class="liveChatComments"
-        :style="{ height: chatHeight }"
+        :style="{ blockSize: chatHeight }"
         @mousewheel="e => onScroll(e)"
+        @scrollend="e => onScroll(e, true)"
       >
         <div
           v-for="(comment, index) in comments"

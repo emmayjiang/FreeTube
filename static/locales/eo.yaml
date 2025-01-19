@@ -1,6 +1,5 @@
 # Put the name of your locale in the same language
 Locale Name: 'Esperanto'
-FreeTube: 'FreeTube'
 # Currently on Subscriptions, Playlists, and History
 File: 'Dosiero'
 Quit: 'Eliri'
@@ -21,6 +20,10 @@ Close: 'Fermi'
 Back: 'Reen'
 Forward: 'Antaŭen'
 
+Global:
+  Community: Komunumo
+  Sort By: 'Ordigi laŭ'
+
 Version {versionNumber} is now available!  Click for more details: 'Versio {versionNumber}
   disponeblas nun!  Alklaki por pli informoj.'
 Download From Site: 'Elŝuti el retejo'
@@ -29,7 +32,6 @@ Search / Go to URL: 'Serĉi / Iri al URL'
 Search Filters:
   Search Filters: 'Serĉaj filtriloj'
   Sort By:
-    Sort By: 'Ordigi laŭ'
     Most Relevant: 'Plej rilataj'
     Rating: 'Takso'
     Upload Date: 'Alŝuta dato'
@@ -57,7 +59,6 @@ Search Filters:
 Subscriptions:
     # On Subscriptions Page
   Subscriptions: 'Abonoj'
-  Latest Subscriptions: 'Lastatempaj abonoj'
   Load More Videos: Ŝargi pli videaĵojn
 Trending:
   Trending: 'Popularaj'
@@ -96,7 +97,6 @@ Settings:
       Dark: 'Malluma'
       Light: 'Luma'
   Player Settings: {}
-  Advanced Settings: {}
 About:
   #On About page
   Blog: Blogo
@@ -105,11 +105,13 @@ About:
 Channel:
   About:
     Details: Detaloj
-  Community:
-    Community: Komunumo
 Video: {}
 More: Pli
 Search Bar:
   Clear Input: Klarigi enigon
 Are you sure you want to open this link?: Ĉu vi certe volas malfermi ĉi-ligilon?
 Open New Window: Malfermi novan fenestron
+Reload: Reŝarĝi
+Preferences: Agordoj
+New Window: Nova Fenestro
+Go to page: Iri al {page}
